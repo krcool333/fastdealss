@@ -6,7 +6,7 @@ from telegram import Bot
 from dotenv import load_dotenv
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -28,19 +28,20 @@ SOURCE_GROUPS_INPUTS = [
     'universaldeals'
 ]
 
-# Use a unique session name based on environment
-SESSION_NAME = os.getenv('SESSION_NAME', 'telegram_monitor_session')
+# Use bot token for authentication (no phone input needed)
+SESSION_NAME = 'bot_session'
 
 client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 bot = Bot(BOT_TOKEN)
 
 async def safe_client_start():
-    """Safely start the Telegram client with session management"""
+    """Safely start the Telegram client using bot token"""
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            await client.start()
-            logger.info("Telegram client started successfully")
+            # Start using bot token (no phone input required)
+            await client.start(bot_token=BOT_TOKEN)
+            logger.info("Telegram client started successfully with bot token")
             return True
         except Exception as e:
             logger.error(f"Attempt {attempt + 1} failed: {e}")
@@ -57,7 +58,6 @@ async def safe_client_start():
                     except:
                         pass
                 
-                # Wait before retry
                 await asyncio.sleep(2)
             else:
                 await asyncio.sleep(5)
@@ -77,24 +77,32 @@ async def resolve_source_groups(inputs):
     return resolved
 
 async def main():
-    # Start client safely
+    logger.info("Starting Telegram bot...")
+    
+    # Start client safely with bot token
     if not await safe_client_start():
         logger.error("Could not start Telegram client. Exiting.")
         return
     
     try:
+        # Resolve source groups
         source_groups = await resolve_source_groups(SOURCE_GROUPS_INPUTS)
-        logger.info(f"Monitoring source groups/channels: {source_groups}")
+        logger.info(f"Monitoring {len(source_groups)} source groups/channels")
+        
+        # Check if we resolved any groups
+        if not source_groups:
+            logger.error("No source groups could be resolved. Please check the group IDs/usernames.")
+            return
 
         @client.on(events.NewMessage(chats=source_groups))
         async def handler(event):
             try:
                 await client.forward_messages(CHANNEL_ID, event.message)
-                logger.info(f"Forwarded message from {event.chat_id}")
+                logger.info(f"✅ Forwarded message from chat ID: {event.chat_id}")
             except Exception as e:
-                logger.error(f"Error forwarding message: {e}")
+                logger.error(f"❌ Error forwarding message: {e}")
 
-        logger.info("Bot is running... Listening to source groups.")
+        logger.info("🤖 Bot is running and listening to source groups...")
         await client.run_until_disconnected()
         
     except Exception as e:
