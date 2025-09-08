@@ -11,12 +11,16 @@ API_HASH = os.getenv('API_HASH')
 BOT_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 
-# List of sources: either usernames, invite links, or channel IDs
+# List of Telegram groups/channels to monitor: usernames, invite links, or numeric IDs
 SOURCE_GROUPS_INPUTS = [
     'https://t.me/+sX1Ht4p33nFjZDE1',  # Offerzone 2.0 (invite link, will be resolved)
     -1001361058246,                    # QUICK DEALS (numeric ID)
     'CrazyOffersDealssss',             # Crazy Offers Deals - COD (username)
-    'Yaha_Everything'                  # Yaha Everything (username)
+    'Yaha_Everything',                 # Yaha Everything (username)
+    'AFMdealzone',                    # AFM Dealzone (username)
+    'shoppinglootindia',              # Shopping Loot India (username)
+    'shoppingloot8',                  # Shopping Loot 8 (username)
+    'universaldeals'                  # Universal Deals (username)
 ]
 
 client = TelegramClient('session', API_ID, API_HASH)
@@ -41,9 +45,8 @@ async def main():
     @client.on(events.NewMessage(chats=source_groups))
     async def handler(event):
         try:
-            message = event.message.message or ""
-            if message.strip():
-                await bot.send_message(chat_id=CHANNEL_ID, text=message)
+            # Forward full original message including media and formatting
+            await client.forward_messages(CHANNEL_ID, event.message)
         except Exception as e:
             print(f"Error forwarding message: {e}")
 
