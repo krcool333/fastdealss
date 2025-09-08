@@ -1,19 +1,18 @@
+
 import os
 import asyncio
 from telethon import TelegramClient, events
 from telegram import Bot
 from dotenv import load_dotenv
 
-# Load variables if using .env locally; safe to keep on Render too
 load_dotenv()
 
 API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
 BOT_TOKEN = os.getenv('TELEGRAM_TOKEN')
-CHANNEL_ID = int(os.getenv('CHANNEL_ID'))  # Make sure to set numeric channel ID on Render
+CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 
 # Add your source groups/channels here (usernames or IDs)
-# You can update these on Render environment or hardcode here as needed
 SOURCE_GROUPS = [
     'sX1Ht4p33nFjZDE1',   # Example username or group invite hash
     -1001361058246        # Numeric channel or group ID
