@@ -18,8 +18,6 @@ CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 
 # List of Telegram groups/channels to monitor
 SOURCE_GROUPS_INPUTS = [
-    'https://t.me/+sX1Ht4p33nFjZDE1',
-    -1001361058246,
     'CrazyOffersDealssss',
     'Yaha_Everything',
     'AFMdealzone',
