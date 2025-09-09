@@ -1,28 +1,26 @@
 import os
 import asyncio
 from telethon import TelegramClient, events
-from telegram import Bot
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load environment variables
+dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(dotenv_path=dotenv_path)
 
 API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
-BOT_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 
-# List of Telegram groups/channels to monitor: usernames, invite links, or numeric IDs
 SOURCE_GROUPS_INPUTS = [
-    'CrazyOffersDealssss',             # Crazy Offers Deals - COD (username)
-    'Yaha_Everything',                 # Yaha Everything (username)
-    'AFMdealzone',                    # AFM Dealzone (username)
-    'shoppinglootindia',              # Shopping Loot India (username)
-    'shoppingloot8',                  # Shopping Loot 8 (username)
-    'universaldeals'                  # Universal Deals (username)
+    'CrazyOffersDealssss',
+    'Yaha_Everything',
+    'AFMdealzone',
+    'shoppinglootindia',
+    'shoppingloot8',
+    'universaldeals'
 ]
 
 client = TelegramClient('session', API_ID, API_HASH)
-bot = Bot(BOT_TOKEN)
 
 async def resolve_source_groups(inputs):
     resolved = []
@@ -37,16 +35,20 @@ async def resolve_source_groups(inputs):
 async def main():
     await client.start()
     source_groups = await resolve_source_groups(SOURCE_GROUPS_INPUTS)
-    
     print(f"Monitoring source groups/channels: {source_groups}")
 
     @client.on(events.NewMessage(chats=source_groups))
     async def handler(event):
         try:
-            # Forward full original message including media and formatting
-            await client.forward_messages(CHANNEL_ID, event.message)
+            message = event.message.text or event.message.message or ""
+            # If there are media attachments, you can also handle them here
+            if event.message.media:
+                await client.send_file(CHANNEL_ID, event.message.media, caption=message)
+            elif message.strip():
+                await client.send_message(CHANNEL_ID, message)
+            print(f"Sent message without forwarding: {message[:40]}")
         except Exception as e:
-            print(f"Error forwarding message: {e}")
+            print(f"Error posting message: {e}")
 
     print("Bot is running... Listening to source groups.")
     await client.run_until_disconnected()
