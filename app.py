@@ -13,7 +13,6 @@ API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
 CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 
-# Updated list of numeric channel IDs (private/plus channels)
 SOURCE_GROUPS_INPUTS = [
     -1001315464303,  # Offerzone 2.0
     -1001714047949,  # Trending Loot Deals 2.0
@@ -28,11 +27,22 @@ SOURCE_GROUPS_INPUTS = [
 client = TelegramClient('session', API_ID, API_HASH)
 app = Flask(__name__)
 
+async def resolve_source_groups(inputs):
+    resolved = []
+    for src in inputs:
+        try:
+            entity = await client.get_entity(src)
+            resolved.append(entity.id)
+        except Exception as e:
+            print(f"Failed to resolve {src}: {e}")
+    return resolved
+
 async def bot_main():
     await client.start()
-    print(f"Monitoring source groups/channels: {SOURCE_GROUPS_INPUTS}")
+    source_groups = await resolve_source_groups(SOURCE_GROUPS_INPUTS)
+    print(f"Monitoring source groups/channels: {source_groups}")
 
-    @client.on(events.NewMessage(chats=SOURCE_GROUPS_INPUTS))
+    @client.on(events.NewMessage(chats=source_groups))
     async def handler(event):
         try:
             message = event.message.text or event.message.message or ""
