@@ -1,5 +1,4 @@
-telethon==1.34.0
-python-dotenv==1.0.0
-flask==2.3.2
+telethon>=1.41.2
+python-dotenv
 python-telegram-bot==20.3
 
