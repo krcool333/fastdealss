@@ -1,5 +1,8 @@
 import os
 import asyncio
+from threading import Thread
+
+from flask import Flask
 from telethon import TelegramClient, events
 from dotenv import load_dotenv
 
@@ -21,6 +24,7 @@ SOURCE_GROUPS_INPUTS = [
 ]
 
 client = TelegramClient('session', API_ID, API_HASH)
+app = Flask(__name__)
 
 async def resolve_source_groups(inputs):
     resolved = []
@@ -32,7 +36,7 @@ async def resolve_source_groups(inputs):
             print(f"Failed to resolve {src}: {e}")
     return resolved
 
-async def main():
+async def bot_main():
     await client.start()
     source_groups = await resolve_source_groups(SOURCE_GROUPS_INPUTS)
     print(f"Monitoring source groups/channels: {source_groups}")
@@ -41,7 +45,6 @@ async def main():
     async def handler(event):
         try:
             message = event.message.text or event.message.message or ""
-            # If there are media attachments, you can also handle them here
             if event.message.media:
                 await client.send_file(CHANNEL_ID, event.message.media, caption=message)
             elif message.strip():
@@ -53,5 +56,19 @@ async def main():
     print("Bot is running... Listening to source groups.")
     await client.run_until_disconnected()
 
+def start_bot_loop(loop):
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(bot_main())
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
 if __name__ == '__main__':
-    asyncio.run(main())
+    # Start Telegram bot in a separate thread
+    new_loop = asyncio.new_event_loop()
+    t = Thread(target=start_bot_loop, args=(new_loop,))
+    t.start()
+
+    # Start Flask web server on port 10000 or any allowed port
+    app.run(host='0.0.0.0', port=10000)
