@@ -1,5 +1,5 @@
 telethon>=1.41.2
-python-dotenv
+python-dotenv==1.0.0
 flask==2.3.2
 python-telegram-bot==20.3
-gunicorn==21.2.0
+
