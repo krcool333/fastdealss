@@ -13,8 +13,6 @@ CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 
 # List of Telegram groups/channels to monitor: usernames, invite links, or numeric IDs
 SOURCE_GROUPS_INPUTS = [
-    'https://t.me/+sX1Ht4p33nFjZDE1',  # Offerzone 2.0 (invite link, will be resolved)
-    -1001361058246,                    # QUICK DEALS (numeric ID)
     'CrazyOffersDealssss',             # Crazy Offers Deals - COD (username)
     'Yaha_Everything',                 # Yaha Everything (username)
     'AFMdealzone',                    # AFM Dealzone (username)
