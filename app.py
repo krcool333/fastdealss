@@ -5,7 +5,7 @@ from flask import Flask
 from telethon import TelegramClient, events
 from dotenv import load_dotenv
 
-# Load environment from .env in the same directory
+# Load environment variables
 dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(dotenv_path=dotenv_path)
 
@@ -65,10 +65,13 @@ def start_bot_loop(loop):
 def home():
     return "Bot is running!"
 
+@app.route('/ping')
+def ping():
+    return "pong"  # Respond to uptime monitor pings to keep service alive
+
 if __name__ == '__main__':
     new_loop = asyncio.new_event_loop()
     t = Thread(target=start_bot_loop, args=(new_loop,))
-    t.daemon = True  # ensures thread closes with main
+    t.daemon = True  # Ensure thread closes with main process
     t.start()
-    # Run Flask development server in a single threaded, non-reloading mode
     app.run(host='0.0.0.0', port=10000, debug=False, use_reloader=False, threaded=False)
