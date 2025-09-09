@@ -13,15 +13,16 @@ API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
 CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 
-# List of channel IDs/usernames you want to monitor.
-# All IDs must be integers!
+# Updated list of numeric channel IDs (private/plus channels)
 SOURCE_GROUPS_INPUTS = [
-    -1001315464303,    # Offerzone 2.0
-    -1001714047949,    # Trending Loot Deals 2.0
-    -1001707571730,    # Offerzone 3.0
-    -1001820593092,    # Steadfast Deals
-    -1001448358487,    # Yaha Everything
-    # You can add more numeric channel IDs here if needed
+    -1001315464303,  # Offerzone 2.0
+    -1001714047949,  # Trending Loot Deals 2.0
+    -1001707571730,  # Offerzone 3.0
+    -1001820593092,  # Steadfast Deals
+    -1001448358487,  # Yaha Everything
+    -1001378801949,  # UNIVERSAL DEALS
+    -1001387180060,  # Crazy Offers Deals - COD
+    -1001361058246,  # QUICK DEALS
 ]
 
 client = TelegramClient('session', API_ID, API_HASH)
@@ -55,9 +56,7 @@ def home():
     return "Bot is running!"
 
 if __name__ == '__main__':
-    # Start Telegram bot in a separate thread
     new_loop = asyncio.new_event_loop()
     t = Thread(target=start_bot_loop, args=(new_loop,))
     t.start()
-    # Start Flask web server on port 10000 or any allowed port
     app.run(host='0.0.0.0', port=10000)
