@@ -1,6 +1,7 @@
 import os
 import asyncio
 import re
+import aiohttp
 from threading import Thread
 from flask import Flask
 from telethon import TelegramClient, events
@@ -16,7 +17,7 @@ CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 
 # Your affiliate identifiers
 AMAZON_AFFILIATE_TAG = "lootfastdeals-21"
-EARNKARO_USER_ID = "4598441"  # Your EarnKaro User ID from the screenshot
+EARNKARO_USER_ID = "4598441"
 
 SOURCE_GROUPS_INPUTS = [
     -1001315464303,  # Offerzone 2.0
@@ -35,6 +36,51 @@ SOURCE_GROUPS_INPUTS = [
 client = TelegramClient('session', API_ID, API_HASH)
 app = Flask(__name__)
 
+# Short URL patterns that need expansion
+SHORTLINK_PATTERNS = [
+    r'(https?://fkrt\.cc/\S+)',
+    r'(https?://myntr\.it/\S+)',
+    r'(https?://dl\.flipkart\.com/\S+)',
+    r'(https?://amzn\.to/\S+)',
+    r'(https?://amzn\.in/\S+)',
+    r'(https?://bit\.ly/\S+)',
+    r'(https?://tinyurl\.com/\S+)'
+]
+
+async def expand_url(short_url, session):
+    """Expand a short URL to its full destination"""
+    try:
+        async with session.head(short_url, allow_redirects=True, timeout=5) as resp:
+            expanded_url = str(resp.url)
+            print(f"Expanded: {short_url} -> {expanded_url}")
+            return expanded_url
+    except Exception as e:
+        print(f"Error expanding {short_url}: {e}")
+        return short_url
+
+async def expand_all_shortlinks(text):
+    """Find and expand all short links in text"""
+    if not text:
+        return text
+    
+    # Find all short links
+    shortlinks = []
+    for pattern in SHORTLINK_PATTERNS:
+        matches = re.findall(pattern, text)
+        shortlinks.extend(matches)
+    
+    if not shortlinks:
+        return text
+    
+    # Expand all short links
+    async with aiohttp.ClientSession() as session:
+        expanded_text = text
+        for short_link in shortlinks:
+            expanded_link = await expand_url(short_link, session)
+            expanded_text = expanded_text.replace(short_link, expanded_link)
+    
+    return expanded_text
+
 def convert_amazon_links(text):
     """Convert Amazon links to use your affiliate tag"""
     if not text:
@@ -42,7 +88,6 @@ def convert_amazon_links(text):
     
     patterns = [
         r'(https?://(?:www\.)?amazon\.(?:com|in|co\.uk|de|fr|es|it|ca|com\.au|co\.jp)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))(?:[/?].*?)?(?=\s|$|[^\w\-])',
-        r'(https?://(?:amzn\.to|amzn\.in|amzn\.eu)/([A-Z0-9]{8,}))',
         r'(https?://(?:www\.)?amazon\.(?:com|in|co\.uk|de|fr|es|it|ca|com\.au|co\.jp)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))(?:[/?].*?)?(?:\?|&)tag=[^&\s]*'
     ]
     
@@ -58,29 +103,29 @@ def convert_amazon_links(text):
     return text
 
 def convert_earnkaro_links(text):
-    """Convert Flipkart/Myntra links to EarnKaro affiliate links"""
+    """Convert Flipkart/Myntra/other partner links to EarnKaro affiliate links"""
     if not text:
         return text
     
-    # Patterns for Flipkart, Myntra, and other EarnKaro partners
+    # Patterns for various e-commerce sites
     patterns = [
         # Flipkart patterns
         r'(https?://(?:www\.)?flipkart\.com/[^\s]+)',
         r'(https?://(?:dl\.)?flipkart\.com/[^\s]+)',
-        r'(https?://(?:www\.)?fkrt\.co/[^\s]+)',
-        r'(https?://fkrt\.co/[^\s]+)',
         # Myntra patterns
         r'(https?://(?:www\.)?myntra\.com/[^\s]+)',
-        r'(https?://myntr\.co/[^\s]+)',
         # Ajio patterns
         r'(https?://(?:www\.)?ajio\.com/[^\s]+)',
         # Nykaa patterns
-        r'(https?://(?:www\.)?nykaa\.com/[^\s]+)'
+        r'(https?://(?:www\.)?nykaa\.com/[^\s]+)',
+        # Meesho patterns
+        r'(https?://(?:www\.)?meesho\.com/[^\s]+)',
+        # FirstCry patterns
+        r'(https?://(?:www\.)?firstcry\.com/[^\s]+)'
     ]
     
     def replace_earnkaro_link(match):
         original_link = match.group(1)
-        # EarnKaro link format: https://earnkaro.com/store?id=USER_ID&url=ORIGINAL_URL
         earnkaro_link = f"https://earnkaro.com/store?id={EARNKARO_USER_ID}&url={original_link}"
         return earnkaro_link
     
@@ -94,6 +139,16 @@ def convert_all_affiliate_links(text):
     text = convert_amazon_links(text)
     text = convert_earnkaro_links(text)
     return text
+
+async def process_message_with_affiliates(message):
+    """Complete pipeline: expand short links then convert to affiliate links"""
+    # Step 1: Expand all short URLs
+    expanded_message = await expand_all_shortlinks(message)
+    
+    # Step 2: Convert expanded URLs to affiliate links
+    affiliate_message = convert_all_affiliate_links(expanded_message)
+    
+    return affiliate_message
 
 async def resolve_source_groups(inputs):
     resolved = []
@@ -115,15 +170,15 @@ async def bot_main():
         try:
             message = event.message.text or event.message.message or ""
             
-            # Convert all affiliate links
-            converted_message = convert_all_affiliate_links(message)
+            # Complete affiliate processing pipeline
+            converted_message = await process_message_with_affiliates(message)
             
             if event.message.media:
                 await client.send_file(CHANNEL_ID, event.message.media, caption=converted_message)
             elif converted_message.strip():
                 await client.send_message(CHANNEL_ID, converted_message)
             
-            print(f"Sent message with converted links: {converted_message[:60]}")
+            print(f"Processed message: {converted_message[:60]}")
         except Exception as e:
             print(f"Error posting message: {e}")
 
