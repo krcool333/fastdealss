@@ -22,6 +22,9 @@ SOURCE_GROUPS_INPUTS = [
     -1001378801949,  # UNIVERSAL DEALS
     -1001387180060,  # Crazy Offers Deals - COD
     -1001361058246,  # QUICK DEALS
+    -1001561964907,  # NEW SOURCE 1
+    -1002444882171,  # NEW SOURCE 2
+    -1001505338947   # NEW SOURCE 3
 ]
 
 client = TelegramClient('session', API_ID, API_HASH)
@@ -58,8 +61,11 @@ async def bot_main():
     await client.run_until_disconnected()
 
 def start_bot_loop(loop):
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(bot_main())
+    try:
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(bot_main())
+    except Exception as e:
+        print(f"Bot thread exception: {type(e).__name__}: {e}")
 
 @app.route('/')
 def home():
@@ -67,11 +73,11 @@ def home():
 
 @app.route('/ping')
 def ping():
-    return "pong"  # Respond to uptime monitor pings to keep service alive
+    return "pong"
 
 if __name__ == '__main__':
     new_loop = asyncio.new_event_loop()
     t = Thread(target=start_bot_loop, args=(new_loop,))
-    t.daemon = True  # Ensure thread closes with main process
+    t.daemon = True
     t.start()
     app.run(host='0.0.0.0', port=10000, debug=False, use_reloader=False, threaded=False)
