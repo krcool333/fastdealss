@@ -5,7 +5,7 @@ from telethon import TelegramClient, events
 from telethon.errors.common import TypeNotFoundError
 from dotenv import load_dotenv
 
-# Load env vars
+# Load environment variables
 dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(dotenv_path=dotenv_path)
 
@@ -48,7 +48,7 @@ async def expand_all(text):
 def convert_amazon(text):
     pats = [
         r'(https?://(?:www\.)?amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))',
-        r'(https?://(?:www\.)?amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))(?:[/?].*?)?(?:\?|&)tag=[^&\s]*'
+        r'(https?://(?:www\.)?amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))(?:\?|&)tag=[^&\s]*'
     ]
     for p in pats:
         text = re.sub(p, lambda m: f"https://www.amazon.in/dp/{m.group(2)}/?tag={AMAZON_TAG}", text, flags=re.I)
@@ -98,7 +98,7 @@ async def bot_main():
             pass
 
     @client.on(events.NewMessage(chats=sources))
-    async def h(e):
+    async def handler(e):
         global seen_urls
         if e.message.media: return
         txt = e.message.message or e.message.text or ""
@@ -108,7 +108,6 @@ async def bot_main():
         new = [u for u in urls if u not in seen_urls]
         if not new: return
         seen_urls.update(new)
-        # Determine header
         hdr = ""
         if any("flipkart.com" in u or "fkrt.cc" in u for u in new):
             hdr = "Flipkart Deal:\n"
@@ -132,7 +131,15 @@ def start_loop(loop):
         except:
             break
 
+@app.route('/')
+def home():
+    return "Bot running"
+
+@app.route('/ping')
+def ping():
+    return "pong"
+
 if __name__ == '__main__':
-    l = asyncio.new_event_loop()
-    Thread(target=start_loop, args=(l,), daemon=True).start()
+    loop = asyncio.new_event_loop()
+    Thread(target=start_loop, args=(loop,), daemon=True).start()
     app.run(host='0.0.0.0', port=10000, debug=False, use_reloader=False, threaded=False)
