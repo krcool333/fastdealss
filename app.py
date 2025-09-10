@@ -1,5 +1,6 @@
 import os
 import asyncio
+import re
 from threading import Thread
 from flask import Flask
 from telethon import TelegramClient, events
@@ -12,6 +13,9 @@ load_dotenv(dotenv_path=dotenv_path)
 API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
 CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
+
+# Your Amazon affiliate tag
+AFFILIATE_TAG = "lootfastdeals-21"
 
 SOURCE_GROUPS_INPUTS = [
     -1001315464303,  # Offerzone 2.0
@@ -29,6 +33,37 @@ SOURCE_GROUPS_INPUTS = [
 
 client = TelegramClient('session', API_ID, API_HASH)
 app = Flask(__name__)
+
+def convert_amazon_links(text):
+    """
+    Convert Amazon links to use your affiliate tag
+    """
+    if not text:
+        return text
+    
+    # Patterns for different Amazon URL formats
+    patterns = [
+        # Standard Amazon URLs with /dp/ or /gp/product/
+        r'(https?://(?:www\.)?amazon\.(?:com|in|co\.uk|de|fr|es|it|ca|com\.au|co\.jp)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))(?:[/?].*?)?(?=\s|$|[^\w\-])',
+        # Short Amazon URLs (amzn.to, amzn.in, etc.)
+        r'(https?://(?:amzn\.to|amzn\.in|amzn\.eu)/([A-Z0-9]{8,}))',
+        # Amazon links with existing affiliate tags
+        r'(https?://(?:www\.)?amazon\.(?:com|in|co\.uk|de|fr|es|it|ca|com\.au|co\.jp)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))(?:[/?].*?)?(?:\?|&)tag=[^&\s]*'
+    ]
+    
+    def replace_link(match):
+        # Extract ASIN (Amazon product ID)
+        if len(match.groups()) >= 2:
+            asin = match.group(2)
+            # Create clean affiliate link
+            return f"https://www.amazon.in/dp/{asin}/?tag={AFFILIATE_TAG}"
+        return match.group(0)
+    
+    # Apply patterns to replace Amazon links
+    for pattern in patterns:
+        text = re.sub(pattern, replace_link, text, flags=re.IGNORECASE)
+    
+    return text
 
 async def resolve_source_groups(inputs):
     resolved = []
@@ -49,11 +84,16 @@ async def bot_main():
     async def handler(event):
         try:
             message = event.message.text or event.message.message or ""
+            
+            # Convert Amazon links to use your affiliate tag
+            converted_message = convert_amazon_links(message)
+            
             if event.message.media:
-                await client.send_file(CHANNEL_ID, event.message.media, caption=message)
-            elif message.strip():
-                await client.send_message(CHANNEL_ID, message)
-            print(f"Sent message: {message[:40]}")
+                await client.send_file(CHANNEL_ID, event.message.media, caption=converted_message)
+            elif converted_message.strip():
+                await client.send_message(CHANNEL_ID, converted_message)
+            
+            print(f"Sent message with converted links: {converted_message[:40]}")
         except Exception as e:
             print(f"Error posting message: {e}")
 
