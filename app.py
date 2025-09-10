@@ -2,12 +2,14 @@ import os
 import asyncio
 import re
 import aiohttp
+import time
 from threading import Thread
 from flask import Flask
 from telethon import TelegramClient, events
+from telethon.errors.common import TypeNotFoundError
 from dotenv import load_dotenv
 
-# Load environment variables
+# Load env vars
 dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(dotenv_path=dotenv_path)
 
@@ -15,182 +17,139 @@ API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
 CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 
-# Your affiliate identifiers
+# Affiliate tags
 AMAZON_AFFILIATE_TAG = "lootfastdeals-21"
 EARNKARO_USER_ID = "4598441"
 
+# Source channel IDs
 SOURCE_GROUPS_INPUTS = [
-    -1001315464303,  # Offerzone 2.0
-    -1001714047949,  # Trending Loot Deals 2.0
-    -1001707571730,  # Offerzone 3.0
-    -1001820593092,  # Steadfast Deals
-    -1001448358487,  # Yaha Everything
-    -1001378801949,  # UNIVERSAL DEALS
-    -1001387180060,  # Crazy Offers Deals - COD
-    -1001361058246,  # QUICK DEALS
-    -1001561964907,  # NEW SOURCE 1
-    -1002444882171,  # NEW SOURCE 2
-    -1001505338947   # NEW SOURCE 3
+    -1001315464303, -1001714047949, -1001707571730,
+    -1001820593092, -1001448358487, -1001378801949,
+    -1001387180060, -1001361058246,
+    -1001561964907, -1002444882171, -1001505338947
 ]
 
-client = TelegramClient('session', API_ID, API_HASH)
-app = Flask(__name__)
-
-# Short URL patterns that need expansion
+# Patterns for short links
 SHORTLINK_PATTERNS = [
     r'(https?://fkrt\.cc/\S+)',
     r'(https?://myntr\.it/\S+)',
     r'(https?://dl\.flipkart\.com/\S+)',
+    r'(https?://ajio\.me/\S+)',
     r'(https?://amzn\.to/\S+)',
     r'(https?://amzn\.in/\S+)',
     r'(https?://bit\.ly/\S+)',
     r'(https?://tinyurl\.com/\S+)'
 ]
 
+# Keep track of forwarded links to avoid duplicates
+seen_links = set()
+
+client = TelegramClient('session', API_ID, API_HASH)
+app = Flask(__name__)
+
 async def expand_url(short_url, session):
-    """Expand a short URL to its full destination"""
     try:
         async with session.head(short_url, allow_redirects=True, timeout=5) as resp:
-            expanded_url = str(resp.url)
-            print(f"Expanded: {short_url} -> {expanded_url}")
-            return expanded_url
-    except Exception as e:
-        print(f"Error expanding {short_url}: {e}")
+            return str(resp.url)
+    except:
         return short_url
 
 async def expand_all_shortlinks(text):
-    """Find and expand all short links in text"""
-    if not text:
-        return text
-    
-    # Find all short links
-    shortlinks = []
+    links = []
     for pattern in SHORTLINK_PATTERNS:
-        matches = re.findall(pattern, text)
-        shortlinks.extend(matches)
-    
-    if not shortlinks:
+        links += re.findall(pattern, text)
+    if not links:
         return text
-    
-    # Expand all short links
     async with aiohttp.ClientSession() as session:
-        expanded_text = text
-        for short_link in shortlinks:
-            expanded_link = await expand_url(short_link, session)
-            expanded_text = expanded_text.replace(short_link, expanded_link)
-    
-    return expanded_text
+        for url in links:
+            full = await expand_url(url, session)
+            text = text.replace(url, full)
+    return text
 
 def convert_amazon_links(text):
-    """Convert Amazon links to use your affiliate tag"""
-    if not text:
-        return text
-    
     patterns = [
-        r'(https?://(?:www\.)?amazon\.(?:com|in|co\.uk|de|fr|es|it|ca|com\.au|co\.jp)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))(?:[/?].*?)?(?=\s|$|[^\w\-])',
-        r'(https?://(?:www\.)?amazon\.(?:com|in|co\.uk|de|fr|es|it|ca|com\.au|co\.jp)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))(?:[/?].*?)?(?:\?|&)tag=[^&\s]*'
+        r'(https?://(?:www\.)?amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))',
+        r'(https?://(?:www\.)?amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))(?:\?|&)tag=[^&\s]*'
     ]
-    
-    def replace_amazon_link(match):
-        if len(match.groups()) >= 2:
-            asin = match.group(2)
-            return f"https://www.amazon.in/dp/{asin}/?tag={AMAZON_AFFILIATE_TAG}"
-        return match.group(0)
-    
-    for pattern in patterns:
-        text = re.sub(pattern, replace_amazon_link, text, flags=re.IGNORECASE)
-    
+    def rep(m):
+        asin = m.group(2)
+        return f"https://www.amazon.in/dp/{asin}/?tag={AMAZON_AFFILIATE_TAG}"
+    for p in patterns:
+        text = re.sub(p, rep, text, flags=re.IGNORECASE)
     return text
 
 def convert_earnkaro_links(text):
-    """Convert Flipkart/Myntra/other partner links to EarnKaro affiliate links"""
-    if not text:
-        return text
-    
-    # Patterns for various e-commerce sites
-    patterns = [
-        # Flipkart patterns
-        r'(https?://(?:www\.)?flipkart\.com/[^\s]+)',
-        r'(https?://(?:dl\.)?flipkart\.com/[^\s]+)',
-        # Myntra patterns
-        r'(https?://(?:www\.)?myntra\.com/[^\s]+)',
-        # Ajio patterns
-        r'(https?://(?:www\.)?ajio\.com/[^\s]+)',
-        # Nykaa patterns
-        r'(https?://(?:www\.)?nykaa\.com/[^\s]+)',
-        # Meesho patterns
-        r'(https?://(?:www\.)?meesho\.com/[^\s]+)',
-        # FirstCry patterns
-        r'(https?://(?:www\.)?firstcry\.com/[^\s]+)'
+    partners = [
+        r'(https?://(?:www\.)?flipkart\.com/\S+)',
+        r'(https?://(?:dl\.)?flipkart\.com/\S+)',
+        r'(https?://(?:www\.)?myntra\.com/\S+)',
+        r'(https?://(?:www\.)?ajio\.com/\S+)',
+        r'(https?://(?:www\.)?nykaa\.com/\S+)'
     ]
-    
-    def replace_earnkaro_link(match):
-        original_link = match.group(1)
-        earnkaro_link = f"https://earnkaro.com/store?id={EARNKARO_USER_ID}&url={original_link}"
-        return earnkaro_link
-    
-    for pattern in patterns:
-        text = re.sub(pattern, replace_earnkaro_link, text, flags=re.IGNORECASE)
-    
+    def rep(m):
+        url = m.group(1)
+        return f"https://earnkaro.com/store?id={EARNKARO_USER_ID}&url={url}"
+    for p in partners:
+        text = re.sub(p, rep, text, flags=re.IGNORECASE)
     return text
 
 def convert_all_affiliate_links(text):
-    """Convert both Amazon and EarnKaro partner links"""
     text = convert_amazon_links(text)
     text = convert_earnkaro_links(text)
     return text
 
-async def process_message_with_affiliates(message):
-    """Complete pipeline: expand short links then convert to affiliate links"""
-    # Step 1: Expand all short URLs
-    expanded_message = await expand_all_shortlinks(message)
-    
-    # Step 2: Convert expanded URLs to affiliate links
-    affiliate_message = convert_all_affiliate_links(expanded_message)
-    
-    return affiliate_message
+async def process_text(text):
+    text = await expand_all_shortlinks(text)
+    return convert_all_affiliate_links(text)
 
-async def resolve_source_groups(inputs):
-    resolved = []
-    for src in inputs:
+async def resolve_source_groups(ids):
+    out = []
+    for i in ids:
         try:
-            entity = await client.get_entity(src)
-            resolved.append(entity.id)
-        except Exception as e:
-            print(f"Failed to resolve {src}: {e}")
-    return resolved
+            e = await client.get_entity(i)
+            out.append(e.id)
+        except:
+            pass
+    return out
 
 async def bot_main():
     await client.start()
-    source_groups = await resolve_source_groups(SOURCE_GROUPS_INPUTS)
-    print(f"Monitoring source groups/channels: {source_groups}")
-
-    @client.on(events.NewMessage(chats=source_groups))
-    async def handler(event):
-        try:
-            message = event.message.text or event.message.message or ""
-            
-            # Complete affiliate processing pipeline
-            converted_message = await process_message_with_affiliates(message)
-            
-            if event.message.media:
-                await client.send_file(CHANNEL_ID, event.message.media, caption=converted_message)
-            elif converted_message.strip():
-                await client.send_message(CHANNEL_ID, converted_message)
-            
-            print(f"Processed message: {converted_message[:60]}")
-        except Exception as e:
-            print(f"Error posting message: {e}")
-
-    print("Bot is running... Listening to source groups.")
+    sources = await resolve_source_groups(SOURCE_GROUPS_INPUTS)
+    @client.on(events.NewMessage(chats=sources))
+    async def handler(ev):
+        global seen_links
+        msg = ev.message.message or ev.message.text or ""
+        # Skip media-only messages
+        if ev.message.media or not msg:
+            return
+        # Process links
+        converted = await process_text(msg)
+        # Find all URLs in converted text
+        urls = re.findall(r'https?://\S+', converted)
+        # Filter unseen
+        new_urls = [u for u in urls if u not in seen_links]
+        if not new_urls:
+            return
+        # Add to seen
+        seen_links.update(new_urls)
+        # Send only once per message
+        await client.send_message(CHANNEL_ID, converted)
     await client.run_until_disconnected()
 
 def start_bot_loop(loop):
-    try:
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(bot_main())
-    except Exception as e:
-        print(f"Bot thread exception: {type(e).__name__}: {e}")
+    retries = 0
+    while retries < 5:
+        try:
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(bot_main())
+            break
+        except TypeNotFoundError as e:
+            retries += 1
+            print(f"TypeNotFoundError, retrying in 10s ({retries}/5)...")
+            time.sleep(10)
+        except Exception as e:
+            print(f"Bot error: {e}")
+            break
 
 @app.route('/')
 def home():
@@ -201,8 +160,8 @@ def ping():
     return "pong"
 
 if __name__ == '__main__':
-    new_loop = asyncio.new_event_loop()
-    t = Thread(target=start_bot_loop, args=(new_loop,))
+    loop = asyncio.new_event_loop()
+    t = Thread(target=start_bot_loop, args=(loop,))
     t.daemon = True
     t.start()
     app.run(host='0.0.0.0', port=10000, debug=False, use_reloader=False, threaded=False)
