@@ -66,8 +66,8 @@ def convert_earnkaro(text):
         text = re.sub(p, lambda m: f"https://earnkaro.com/store?id={EARNKARO_ID}&url={m.group(1)}", text, flags=re.I)
     return text
 
-async def shorten_all(text):
-    urls = re.findall(r'https?://\S+', text)
+async def shorten_earnkaro(text):
+    urls = re.findall(r'https?://earnkaro\.com/store\?id=\d+&url=\S+', text)
     if not urls: return text
     async with aiohttp.ClientSession() as s:
         for u in urls:
@@ -84,50 +84,55 @@ async def process(text):
     t = await expand_all(text)
     t = convert_amazon(t)
     t = convert_earnkaro(t)
-    t = await shorten_all(t)
+    t = await shorten_earnkaro(t)
     return t
 
 async def bot_main():
     await client.start()
     sources = []
     for i in SOURCE_IDS:
-        try: e = await client.get_entity(i); sources.append(e.id)
-        except: pass
+        try:
+            e = await client.get_entity(i)
+            sources.append(e.id)
+        except:
+            pass
 
     @client.on(events.NewMessage(chats=sources))
     async def h(e):
         global seen_urls
         if e.message.media: return
-        txt = e.message.text or ""
+        txt = e.message.message or e.message.text or ""
         if not txt: return
         out = await process(txt)
         urls = re.findall(r'https?://\S+', out)
         new = [u for u in urls if u not in seen_urls]
         if not new: return
         seen_urls.update(new)
-        await client.send_message(CHANNEL_ID, out, link_preview=False)
+        # Determine header
+        hdr = ""
+        if any("flipkart.com" in u or "fkrt.cc" in u for u in new):
+            hdr = "Flipkart Deal:\n"
+        elif any("myntra.com" in u for u in new):
+            hdr = "Myntra Deal:\n"
+        elif any("amazon.in" in u for u in new):
+            hdr = "Amazon Deal:\n"
+        msg = hdr + out
+        await client.send_message(CHANNEL_ID, msg, link_preview=False)
 
     await client.run_until_disconnected()
 
 def start_loop(loop):
-    for i in range(5):
+    for _ in range(5):
         try:
             asyncio.set_event_loop(loop)
             loop.run_until_complete(bot_main())
             break
         except TypeNotFoundError:
             time.sleep(10)
-        except Exception:
+        except:
             break
-
-@app.route('/')
-def home(): return "Bot running"
-@app.route('/ping')
-def ping(): return "pong"
 
 if __name__ == '__main__':
     l = asyncio.new_event_loop()
-    t = Thread(target=start_loop, args=(l,))
-    t.daemon = True
-    t.start()
+    Thread(target=start_loop, args=(l,), daemon=True).start()
     app.run(host='0.0.0.0', port=10000, debug=False, use_reloader=False, threaded=False)
