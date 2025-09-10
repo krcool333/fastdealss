@@ -14,8 +14,9 @@ API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
 CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 
-# Your Amazon affiliate tag
-AFFILIATE_TAG = "lootfastdeals-21"
+# Your affiliate identifiers
+AMAZON_AFFILIATE_TAG = "lootfastdeals-21"
+EARNKARO_USER_ID = "4598441"  # Your EarnKaro User ID from the screenshot
 
 SOURCE_GROUPS_INPUTS = [
     -1001315464303,  # Offerzone 2.0
@@ -35,34 +36,63 @@ client = TelegramClient('session', API_ID, API_HASH)
 app = Flask(__name__)
 
 def convert_amazon_links(text):
-    """
-    Convert Amazon links to use your affiliate tag
-    """
+    """Convert Amazon links to use your affiliate tag"""
     if not text:
         return text
     
-    # Patterns for different Amazon URL formats
     patterns = [
-        # Standard Amazon URLs with /dp/ or /gp/product/
         r'(https?://(?:www\.)?amazon\.(?:com|in|co\.uk|de|fr|es|it|ca|com\.au|co\.jp)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))(?:[/?].*?)?(?=\s|$|[^\w\-])',
-        # Short Amazon URLs (amzn.to, amzn.in, etc.)
         r'(https?://(?:amzn\.to|amzn\.in|amzn\.eu)/([A-Z0-9]{8,}))',
-        # Amazon links with existing affiliate tags
         r'(https?://(?:www\.)?amazon\.(?:com|in|co\.uk|de|fr|es|it|ca|com\.au|co\.jp)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))(?:[/?].*?)?(?:\?|&)tag=[^&\s]*'
     ]
     
-    def replace_link(match):
-        # Extract ASIN (Amazon product ID)
+    def replace_amazon_link(match):
         if len(match.groups()) >= 2:
             asin = match.group(2)
-            # Create clean affiliate link
-            return f"https://www.amazon.in/dp/{asin}/?tag={AFFILIATE_TAG}"
+            return f"https://www.amazon.in/dp/{asin}/?tag={AMAZON_AFFILIATE_TAG}"
         return match.group(0)
     
-    # Apply patterns to replace Amazon links
     for pattern in patterns:
-        text = re.sub(pattern, replace_link, text, flags=re.IGNORECASE)
+        text = re.sub(pattern, replace_amazon_link, text, flags=re.IGNORECASE)
     
+    return text
+
+def convert_earnkaro_links(text):
+    """Convert Flipkart/Myntra links to EarnKaro affiliate links"""
+    if not text:
+        return text
+    
+    # Patterns for Flipkart, Myntra, and other EarnKaro partners
+    patterns = [
+        # Flipkart patterns
+        r'(https?://(?:www\.)?flipkart\.com/[^\s]+)',
+        r'(https?://(?:dl\.)?flipkart\.com/[^\s]+)',
+        r'(https?://(?:www\.)?fkrt\.co/[^\s]+)',
+        r'(https?://fkrt\.co/[^\s]+)',
+        # Myntra patterns
+        r'(https?://(?:www\.)?myntra\.com/[^\s]+)',
+        r'(https?://myntr\.co/[^\s]+)',
+        # Ajio patterns
+        r'(https?://(?:www\.)?ajio\.com/[^\s]+)',
+        # Nykaa patterns
+        r'(https?://(?:www\.)?nykaa\.com/[^\s]+)'
+    ]
+    
+    def replace_earnkaro_link(match):
+        original_link = match.group(1)
+        # EarnKaro link format: https://earnkaro.com/store?id=USER_ID&url=ORIGINAL_URL
+        earnkaro_link = f"https://earnkaro.com/store?id={EARNKARO_USER_ID}&url={original_link}"
+        return earnkaro_link
+    
+    for pattern in patterns:
+        text = re.sub(pattern, replace_earnkaro_link, text, flags=re.IGNORECASE)
+    
+    return text
+
+def convert_all_affiliate_links(text):
+    """Convert both Amazon and EarnKaro partner links"""
+    text = convert_amazon_links(text)
+    text = convert_earnkaro_links(text)
     return text
 
 async def resolve_source_groups(inputs):
@@ -85,15 +115,15 @@ async def bot_main():
         try:
             message = event.message.text or event.message.message or ""
             
-            # Convert Amazon links to use your affiliate tag
-            converted_message = convert_amazon_links(message)
+            # Convert all affiliate links
+            converted_message = convert_all_affiliate_links(message)
             
             if event.message.media:
                 await client.send_file(CHANNEL_ID, event.message.media, caption=converted_message)
             elif converted_message.strip():
                 await client.send_message(CHANNEL_ID, converted_message)
             
-            print(f"Sent message with converted links: {converted_message[:40]}")
+            print(f"Sent message with converted links: {converted_message[:60]}")
         except Exception as e:
             print(f"Error posting message: {e}")
 
