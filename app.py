@@ -1,6 +1,6 @@
-import os, asyncio, re, aiohttp, time
+import os, asyncio, re, aiohttp, time, threading, requests
 from threading import Thread
-from flask import Flask
+from flask import Flask, jsonify, request
 from telethon import TelegramClient, events
 from telethon.errors.common import TypeNotFoundError
 from dotenv import load_dotenv
@@ -15,10 +15,10 @@ CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 
 AMAZON_TAG = "lootfastdeals-21"
 EARNKARO_ID = "4598441"
+DEPLOY_HOOK = os.getenv("RENDER_DEPLOY_HOOK")
 SOURCE_IDS = [
-    -1001315464303, -1001714047949, -1001707571730,
-    -1001820593092, -1001448358487, -1001378801949,
-    -1001387180060, -1001361058246,
+    -1001315464303, -1001714047949, -1001707571730, -1001820593092,
+    -1001448358487, -1001378801949, -1001387180060, -1001361058246,
     -1001561964907, -1002444882171, -1001505338947
 ]
 
@@ -30,6 +30,7 @@ SHORT_PATTERNS = [
 ]
 
 seen_urls = set()
+last_msg_time = time.time()
 client = TelegramClient('session', API_ID, API_HASH)
 app = Flask(__name__)
 
@@ -99,7 +100,7 @@ async def bot_main():
 
     @client.on(events.NewMessage(chats=sources))
     async def handler(e):
-        global seen_urls
+        global seen_urls, last_msg_time
         if e.message.media: return
         txt = e.message.message or e.message.text or ""
         if not txt: return
@@ -117,8 +118,37 @@ async def bot_main():
             hdr = "Amazon Deal:\n"
         msg = hdr + out
         await client.send_message(CHANNEL_ID, msg, link_preview=False)
+        last_msg_time = time.time()
 
     await client.run_until_disconnected()
+
+def redeploy():
+    hook = DEPLOY_HOOK
+    if hook:
+        try:
+            requests.post(hook, timeout=10)
+            return True
+        except Exception as e:
+            print(f"Redeploy failed: {e}")
+            return False
+    print("Deploy hook not set!")
+    return False
+
+def keep_alive():
+    while True:
+        try:
+            time.sleep(14 * 60)
+            requests.get("http://127.0.0.1:10000/ping", timeout=5)
+        except:
+            pass
+
+def monitor_health():
+    while True:
+        time.sleep(300)  # 5min
+        since = time.time() - last_msg_time
+        if since > 1800:  # 30min without messages
+            print(f"Health: No msg for {int(since)//60} min, triggering redeploy...")
+            redeploy()
 
 def start_loop(loop):
     for _ in range(5):
@@ -139,7 +169,22 @@ def home():
 def ping():
     return "pong"
 
+@app.route('/health')
+def health():
+    return jsonify(time_since_last_message=int(time.time() - last_msg_time))
+
+@app.route('/stats')
+def stats():
+    return jsonify(unique_links=len(seen_urls))
+
+@app.route('/redeploy', methods=['POST'])
+def redeploy_endpoint():
+    ok = redeploy()
+    return ("ok", 200) if ok else ("fail", 500)
+
 if __name__ == '__main__':
     loop = asyncio.new_event_loop()
     Thread(target=start_loop, args=(loop,), daemon=True).start()
+    Thread(target=keep_alive, daemon=True).start()
+    Thread(target=monitor_health, daemon=True).start()
     app.run(host='0.0.0.0', port=10000, debug=False, use_reloader=False, threaded=False)
