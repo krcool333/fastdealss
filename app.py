@@ -16,10 +16,10 @@ AMAZON_TAG = "lootfastdeals-21"
 EARNKARO_ID = "4598441"
 DEPLOY_HOOK = os.getenv("RENDER_DEPLOY_HOOK")
 
-# WhatsApp WAHA API Configuration
-WAHA_API_URL = os.getenv('WAHA_API_URL')
-WAHA_API_KEY = os.getenv('WAHA_API_KEY')
-WHATSAPP_CHANNEL_ID = os.getenv('WHATSAPP_CHANNEL_ID')
+# Local WAHA API Configuration (via ngrok)
+WAHA_API_URL = os.getenv('WAHA_API_URL')  # https://u455c56d48070.ngrok-free.app
+WAHA_API_KEY = os.getenv('WAHA_API_KEY')  # kr_cool_99987
+WHATSAPP_CHANNEL_ID = os.getenv('WHATSAPP_CHANNEL_ID')  # Your channel ID
 
 SOURCE_IDS = [
     -1001315464303, -1001714047949, -1001707571730, -1001820593092,
@@ -41,73 +41,58 @@ client = TelegramClient('session', API_ID, API_HASH)
 app = Flask(__name__)
 
 async def keep_waha_alive():
-    """Keep WAHA service alive by pinging it every 10 minutes"""
+    """Keep local WAHA service alive by pinging it every 5 minutes"""
     while True:
         try:
-            await asyncio.sleep(600)  # 10 minutes
+            await asyncio.sleep(300)  # 5 minutes
             if WAHA_API_URL:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(f"{WAHA_API_URL}/api/version", 
                                          headers={"X-Api-Key": WAHA_API_KEY},
                                          timeout=10) as response:
                         if response.status == 200:
-                            print("✅ WAHA keep-alive ping successful")
+                            print("✅ Local WAHA keep-alive ping successful")
                         else:
-                            print(f"⚠️ WAHA keep-alive ping failed: {response.status}")
+                            print(f"⚠️ Local WAHA keep-alive ping failed: {response.status}")
         except Exception as e:
-            print(f"❌ WAHA keep-alive error: {e}")
+            print(f"❌ Local WAHA keep-alive error: {e}")
 
 async def send_to_whatsapp(message):
-    """Send message to WhatsApp Channel using WAHA API with retry logic"""
+    """Send message to WhatsApp Channel using local WAHA API"""
     global whatsapp_last_success
     
     if not WAHA_API_URL or not WAHA_API_KEY or not WHATSAPP_CHANNEL_ID:
-        print("❌ WhatsApp API not configured")
+        print("❌ Local WhatsApp API not configured")
         return False
     
-    # Retry logic for 502 errors (service sleeping)
-    for attempt in range(3):
-        try:
-            url = f"{WAHA_API_URL}/api/sendText"
-            headers = {
-                "X-Api-Key": WAHA_API_KEY,
-                "Content-Type": "application/json"
-            }
-            
-            payload = {
-                "chatId": WHATSAPP_CHANNEL_ID,
-                "text": message,
-                "session": "default"
-            }
-            
-            timeout = 20 if attempt == 0 else 30  # Longer timeout on retries
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, headers=headers, timeout=timeout) as response:
-                    if response.status == 200:
-                        print("✅ Message sent to WhatsApp Channel")
-                        whatsapp_last_success = time.time()
-                        return True
-                    elif response.status == 502:
-                        print(f"⚠️ WAHA service sleeping (502), attempt {attempt + 1}/3")
-                        if attempt < 2:  # Don't sleep on last attempt
-                            await asyncio.sleep(30)  # Wait 30s for service to wake up
-                            continue
-                    else:
-                        print(f"❌ WhatsApp API Error: {response.status}")
-                        text = await response.text()
-                        print(f"Error details: {text}")
-                        return False
+    try:
+        url = f"{WAHA_API_URL}/api/sendText"
+        headers = {
+            "X-Api-Key": WAHA_API_KEY,
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "chatId": WHATSAPP_CHANNEL_ID,
+            "text": message,
+            "session": "default"
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=15) as response:
+                if response.status == 200:
+                    print("✅ Message sent to WhatsApp via local WAHA")
+                    whatsapp_last_success = time.time()
+                    return True
+                else:
+                    print(f"❌ Local WAHA API Error: {response.status}")
+                    text = await response.text()
+                    print(f"Error details: {text}")
+                    return False
                         
-        except Exception as e:
-            print(f"❌ WhatsApp send error (attempt {attempt + 1}): {e}")
-            if attempt < 2:
-                await asyncio.sleep(10)
-    
-    print("❌ Failed to send to WhatsApp after 3 attempts")
-    return False
-
-# [Keep all your existing functions: expand_all, convert_amazon, convert_earnkaro, shorten_earnkaro, process, bot_main, redeploy, keep_alive, monitor_health, start_loop]
+    except Exception as e:
+        print(f"❌ Local WAHA send error: {e}")
+        return False
 
 async def expand_all(text):
     urls = sum((re.findall(p, text) for p in SHORT_PATTERNS), [])
@@ -183,7 +168,7 @@ async def bot_main():
     print("🔗 Bot will forward deals to:")
     print(f"   📱 Telegram Channel: {CHANNEL_ID}")
     if WHATSAPP_CHANNEL_ID:
-        print(f"   💬 WhatsApp Channel: {WHATSAPP_CHANNEL_ID}")
+        print(f"   💬 WhatsApp via Local WAHA: {WHATSAPP_CHANNEL_ID}")
     
     @client.on(events.NewMessage(chats=sources))
     async def handler(e):
@@ -217,7 +202,7 @@ async def bot_main():
             await client.send_message(CHANNEL_ID, msg, link_preview=False)
             print("✅ Message sent to Telegram channel")
             
-            # Send to WhatsApp Channel
+            # Send to WhatsApp via Local WAHA
             if WHATSAPP_CHANNEL_ID:
                 await send_to_whatsapp(msg)
             
@@ -280,10 +265,11 @@ def start_loop(loop):
 def home():
     return jsonify({
         "status": "running",
-        "service": "FastDeals Bot - Telegram + WhatsApp",
+        "service": "FastDeals Bot - Telegram + WhatsApp (Local WAHA)",
         "telegram_channel": str(CHANNEL_ID),
         "whatsapp_channel": WHATSAPP_CHANNEL_ID or "not configured",
-        "uptime_hours": round((time.time() - last_msg_time) / 3600, 2)
+        "waha_type": "Local via ngrok",
+        "waha_url": WAHA_API_URL
     })
 
 @app.route('/ping')
@@ -297,7 +283,8 @@ def health():
         "unique_links_processed": len(seen_urls),
         "whatsapp_configured": bool(WHATSAPP_CHANNEL_ID),
         "whatsapp_last_success": int(time.time() - whatsapp_last_success) if whatsapp_last_success else None,
-        "status": "healthy" if (time.time() - last_msg_time) < 3600 else "inactive"
+        "status": "healthy" if (time.time() - last_msg_time) < 3600 else "inactive",
+        "waha_type": "Local via ngrok"
     })
 
 @app.route('/stats')
@@ -307,7 +294,8 @@ def stats():
         "last_message_time": last_msg_time,
         "telegram_channel": CHANNEL_ID,
         "whatsapp_channel": WHATSAPP_CHANNEL_ID,
-        "bot_running": True
+        "bot_running": True,
+        "waha_url": WAHA_API_URL
     })
 
 @app.route('/redeploy', methods=['POST'])
@@ -317,19 +305,19 @@ def redeploy_endpoint():
 
 @app.route('/test-whatsapp', methods=['POST'])
 def test_whatsapp():
-    """Test endpoint to send a message to WhatsApp"""
+    """Test endpoint to send a message to WhatsApp via local WAHA"""
     if not WHATSAPP_CHANNEL_ID:
         return jsonify({"status": "error", "message": "WhatsApp not configured"})
     
     try:
-        test_msg = "🧪 Test message from FastDeals bot!"
+        test_msg = "🧪 Test message from FastDeals bot via Local WAHA!"
         response = requests.post(f"{WAHA_API_URL}/api/sendText",
                                headers={"X-Api-Key": WAHA_API_KEY, "Content-Type": "application/json"},
                                json={"chatId": WHATSAPP_CHANNEL_ID, "text": test_msg, "session": "default"},
                                timeout=10)
         
         if response.status_code == 200:
-            return jsonify({"status": "success", "message": "Test message sent to WhatsApp"})
+            return jsonify({"status": "success", "message": "Test message sent to WhatsApp via Local WAHA"})
         else:
             return jsonify({"status": "error", "message": f"Failed: {response.text}"})
     except Exception as e:
@@ -337,23 +325,23 @@ def test_whatsapp():
 
 @app.route('/waha-health')
 def waha_health():
-    """Check WAHA API health"""
+    """Check local WAHA API health"""
     try:
         response = requests.get(f"{WAHA_API_URL}/api/version",
                               headers={"X-Api-Key": WAHA_API_KEY},
                               timeout=5)
         if response.status_code == 200:
-            return jsonify({"status": "healthy", "waha": response.json()})
+            return jsonify({"status": "healthy", "type": "Local WAHA", "waha": response.json()})
         else:
             return jsonify({"status": "error", "code": response.status_code})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
 
 if __name__ == '__main__':
-    print("🚀 Starting FastDeals Bot with WhatsApp Integration...")
+    print("🚀 Starting FastDeals Bot with Local WAHA Integration...")
     print(f"📱 Telegram Channel: {CHANNEL_ID}")
     print(f"💬 WhatsApp Channel: {WHATSAPP_CHANNEL_ID}")
-    print(f"🔗 WAHA API: {WAHA_API_URL}")
+    print(f"🔗 Local WAHA API: {WAHA_API_URL}")
     
     # Start all threads
     loop = asyncio.new_event_loop()
@@ -361,7 +349,7 @@ if __name__ == '__main__':
     Thread(target=keep_alive, daemon=True).start()
     Thread(target=monitor_health, daemon=True).start()
     
-    # Start WAHA keep-alive
+    # Start WAHA keep-alive for local instance
     if WAHA_API_URL:
         Thread(target=lambda: asyncio.run(keep_waha_alive()), daemon=True).start()
     
