@@ -17,9 +17,9 @@ EARNKARO_ID = "4598441"
 DEPLOY_HOOK = os.getenv("RENDER_DEPLOY_HOOK")
 
 # WhatsApp WAHA API Configuration
-WAHA_API_URL = os.getenv('WAHA_API_URL')  # https://waha-whatsapp-api-uab3.onrender.com
-WAHA_API_KEY = os.getenv('WAHA_API_KEY')  # kr_cool_99987
-WHATSAPP_CHANNEL_ID = os.getenv('WHATSAPP_CHANNEL_ID')  # 120363421452755716@newsletter
+WAHA_API_URL = os.getenv('WAHA_API_URL')
+WAHA_API_KEY = os.getenv('WAHA_API_KEY')
+WHATSAPP_CHANNEL_ID = os.getenv('WHATSAPP_CHANNEL_ID')
 
 SOURCE_IDS = [
     -1001315464303, -1001714047949, -1001707571730, -1001820593092,
@@ -40,41 +40,74 @@ whatsapp_last_success = 0
 client = TelegramClient('session', API_ID, API_HASH)
 app = Flask(__name__)
 
+async def keep_waha_alive():
+    """Keep WAHA service alive by pinging it every 10 minutes"""
+    while True:
+        try:
+            await asyncio.sleep(600)  # 10 minutes
+            if WAHA_API_URL:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"{WAHA_API_URL}/api/version", 
+                                         headers={"X-Api-Key": WAHA_API_KEY},
+                                         timeout=10) as response:
+                        if response.status == 200:
+                            print("✅ WAHA keep-alive ping successful")
+                        else:
+                            print(f"⚠️ WAHA keep-alive ping failed: {response.status}")
+        except Exception as e:
+            print(f"❌ WAHA keep-alive error: {e}")
+
 async def send_to_whatsapp(message):
-    """Send message to WhatsApp Channel using WAHA API"""
+    """Send message to WhatsApp Channel using WAHA API with retry logic"""
     global whatsapp_last_success
     
     if not WAHA_API_URL or not WAHA_API_KEY or not WHATSAPP_CHANNEL_ID:
         print("❌ WhatsApp API not configured")
         return False
     
-    try:
-        url = f"{WAHA_API_URL}/api/sendText"
-        headers = {
-            "X-Api-Key": WAHA_API_KEY,
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "chatId": WHATSAPP_CHANNEL_ID,
-            "text": message,
-            "session": "default"
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=15) as response:
-                if response.status == 200:
-                    print("✅ Message sent to WhatsApp Channel")
-                    whatsapp_last_success = time.time()
-                    return True
-                else:
-                    print(f"❌ WhatsApp API Error: {response.status}")
-                    text = await response.text()
-                    print(f"Error details: {text}")
-                    return False
-    except Exception as e:
-        print(f"❌ WhatsApp send error: {e}")
-        return False
+    # Retry logic for 502 errors (service sleeping)
+    for attempt in range(3):
+        try:
+            url = f"{WAHA_API_URL}/api/sendText"
+            headers = {
+                "X-Api-Key": WAHA_API_KEY,
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "chatId": WHATSAPP_CHANNEL_ID,
+                "text": message,
+                "session": "default"
+            }
+            
+            timeout = 20 if attempt == 0 else 30  # Longer timeout on retries
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, headers=headers, timeout=timeout) as response:
+                    if response.status == 200:
+                        print("✅ Message sent to WhatsApp Channel")
+                        whatsapp_last_success = time.time()
+                        return True
+                    elif response.status == 502:
+                        print(f"⚠️ WAHA service sleeping (502), attempt {attempt + 1}/3")
+                        if attempt < 2:  # Don't sleep on last attempt
+                            await asyncio.sleep(30)  # Wait 30s for service to wake up
+                            continue
+                    else:
+                        print(f"❌ WhatsApp API Error: {response.status}")
+                        text = await response.text()
+                        print(f"Error details: {text}")
+                        return False
+                        
+        except Exception as e:
+            print(f"❌ WhatsApp send error (attempt {attempt + 1}): {e}")
+            if attempt < 2:
+                await asyncio.sleep(10)
+    
+    print("❌ Failed to send to WhatsApp after 3 attempts")
+    return False
+
+# [Keep all your existing functions: expand_all, convert_amazon, convert_earnkaro, shorten_earnkaro, process, bot_main, redeploy, keep_alive, monitor_health, start_loop]
 
 async def expand_all(text):
     urls = sum((re.findall(p, text) for p in SHORT_PATTERNS), [])
@@ -322,11 +355,15 @@ if __name__ == '__main__':
     print(f"💬 WhatsApp Channel: {WHATSAPP_CHANNEL_ID}")
     print(f"🔗 WAHA API: {WAHA_API_URL}")
     
-    # Start Telegram bot
+    # Start all threads
     loop = asyncio.new_event_loop()
     Thread(target=start_loop, args=(loop,), daemon=True).start()
     Thread(target=keep_alive, daemon=True).start()
     Thread(target=monitor_health, daemon=True).start()
+    
+    # Start WAHA keep-alive
+    if WAHA_API_URL:
+        Thread(target=lambda: asyncio.run(keep_waha_alive()), daemon=True).start()
     
     # Start Flask web server
     print("🌐 Starting web server on port 10000...")
