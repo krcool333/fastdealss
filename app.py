@@ -76,18 +76,6 @@ async def send_to_whatsapp(message):
         print(f"❌ WhatsApp send error: {e}")
         return False
 
-async def check_waha_health():
-    """Check if WAHA API is responsive"""
-    try:
-        url = f"{WAHA_API_URL}/api/version"
-        headers = {"X-Api-Key": WAHA_API_KEY}
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as response:
-                return response.status == 200
-    except:
-        return False
-
 async def expand_all(text):
     urls = sum((re.findall(p, text) for p in SHORT_PATTERNS), [])
     if not urls: return text
