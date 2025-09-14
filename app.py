@@ -60,7 +60,7 @@ async def keep_waha_alive():
                         else:
                             print(f"⚠️ Local WAHA keep-alive ping failed: {response.status}")
         except Exception as e:
-            print(f"❌ Local WAHA keep-alive error: {e}")
+            print(f"❌ Local WAHA keep-alive error: {str(e)[:100]}...")  # Truncate long error messages
 
 async def send_to_whatsapp(message):
     """Send message to WhatsApp Channel using local WAHA API"""
@@ -91,12 +91,22 @@ async def send_to_whatsapp(message):
                     return True
                 else:
                     print(f"❌ Local WAHA API Error: {response.status}")
-                    text = await response.text()
-                    print(f"Error details: {text}")
+                    try:
+                        text = await response.text()
+                        # Truncate very long error messages to prevent log flooding
+                        if len(text) > 500:
+                            text = text[:500] + "..."
+                        print(f"Error details: {text}")
+                    except Exception as e:
+                        print(f"Could not read error response: {str(e)[:100]}...")
                     return False
                         
     except Exception as e:
-        print(f"❌ Local WAHA send error: {e}")
+        # Truncate long error messages to prevent log flooding
+        error_msg = str(e)
+        if len(error_msg) > 200:
+            error_msg = error_msg[:200] + "..."
+        print(f"❌ Local WAHA send error: {error_msg}")
         return False
 
 async def expand_all(text):
@@ -381,9 +391,9 @@ def test_whatsapp():
         if response.status_code == 200:
             return jsonify({"status": "success", "message": "Test message sent to WhatsApp via Local WAHA"})
         else:
-            return jsonify({"status": "error", "message": f"Failed: {response.text}"})
+            return jsonify({"status": "error", "message": f"Failed: {response.text[:100]}..."})
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)})
+        return jsonify({"status": "error", "message": str(e)[:100] + "..."})
 
 @app.route('/waha-health')
 def waha_health():
@@ -397,7 +407,7 @@ def waha_health():
         else:
             return jsonify({"status": "error", "code": response.status_code})
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)})
+        return jsonify({"status": "error", "message": str(e)[:100] + "..."})
 
 if __name__ == '__main__':
     print("🚀 Starting FastDeals Bot with Local WAHA Integration...")
