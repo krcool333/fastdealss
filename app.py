@@ -202,7 +202,7 @@ async def bot_main():
         msg = truncate_message(hdr + out)
 
         try:
-            await client.send_message(CHANNEL_ID, msg, link_preview=False)
+            await client.send_message(CHANNEL_ID, msg, link_preview=True)
             print("✅ Forwarded to Telegram")
             if WHATSAPP_CHANNEL_ID:
                 await send_to_whatsapp(msg)
