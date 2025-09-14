@@ -1,4 +1,4 @@
-import os, asyncio, re, aiohttp, time, threading, requests, urllib.parse
+import os, asyncio, re, aiohttp, time, threading, requests, urllib.parse, json
 from threading import Thread
 from flask import Flask, jsonify, request
 from telethon import TelegramClient, events
@@ -16,7 +16,7 @@ AMAZON_TAG = "lootfastdeals-21"
 EARNKARO_ID = "4598441"
 DEPLOY_HOOK = os.getenv("RENDER_DEPLOY_HOOK")
 
-# Local WAHA API Configuration (via ngrok)
+# Local WAHA API Configuration
 WAHA_API_URL = os.getenv('WAHA_API_URL')
 WAHA_API_KEY = os.getenv('WAHA_API_KEY')
 WHATSAPP_CHANNEL_ID = os.getenv('WHATSAPP_CHANNEL_ID')
@@ -45,25 +45,28 @@ app = Flask(__name__)
 # ---------------- Utils ---------------- #
 
 async def keep_waha_alive():
+    """Ping WAHA every 5 minutes, auto-retry if disconnected"""
+    global WAHA_API_URL
     while True:
+        await asyncio.sleep(300)
+        if not WAHA_API_URL: 
+            continue
         try:
-            await asyncio.sleep(300)
-            if WAHA_API_URL:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(f"{WAHA_API_URL}/api/version",
-                                           headers={"X-Api-Key": WAHA_API_KEY},
-                                           timeout=10) as response:
-                        if response.status == 200:
-                            print("✅ Local WAHA keep-alive OK")
-                        else:
-                            print(f"⚠️ WAHA keep-alive failed {response.status}")
-        except Exception as e:
-            print(f"❌ WAHA keep-alive error: {e}")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{WAHA_API_URL}/api/version",
+                                       headers={"X-Api-Key": WAHA_API_KEY},
+                                       timeout=10) as response:
+                    if response.status == 200:
+                        print("✅ WAHA alive")
+                    else:
+                        print(f"⚠️ WAHA ping failed {response.status}")
+        except Exception:
+            print("⚠️ WAHA not reachable, will retry...")
 
 async def send_to_whatsapp(message):
-    global whatsapp_last_success
+    """Send message to WhatsApp via WAHA (auto-retry safe)"""
+    global whatsapp_last_success, WAHA_API_URL
     if not WAHA_API_URL or not WAHA_API_KEY or not WHATSAPP_CHANNEL_ID:
-        print("❌ WAHA not configured")
         return False
     try:
         url = f"{WAHA_API_URL}/api/sendText"
@@ -76,10 +79,10 @@ async def send_to_whatsapp(message):
                     whatsapp_last_success = time.time()
                     return True
                 else:
-                    print(f"❌ WAHA API Error {r.status}")
+                    print(f"⚠️ WAHA API Error {r.status}")
                     return False
-    except Exception as e:
-        print(f"❌ WAHA send error: {e}")
+    except Exception:
+        print("⚠️ WAHA unreachable, skipping WhatsApp")
         return False
 
 async def expand_all(text):
@@ -145,9 +148,7 @@ def canonicalize(url):
     return None
 
 def truncate_message(msg):
-    """Shorten very long deal messages for subscribers"""
-    if len(msg) <= 700:
-        return msg
+    if len(msg) <= 700: return msg
     urls = re.findall(r'https?://\S+', msg)
     more_link = urls[0] if urls else ""
     return msg[:500] + "...\n👉 More: " + more_link
@@ -177,7 +178,6 @@ async def bot_main():
         urls = re.findall(r'https?://\S+', expanded)
         now = time.time()
 
-        # Dedup
         new_canon = []
         async with aiohttp.ClientSession() as s:
             for u in urls:
@@ -193,7 +193,6 @@ async def bot_main():
         if not new_canon: return
         for c in new_canon: seen_products[c] = now
 
-        # Process & truncate
         out = await process(txt)
         hdr = ""
         if any(c.startswith("amazon:") for c in new_canon): hdr = "📦 Amazon Deal:\n"
@@ -328,6 +327,23 @@ def waha_health():
             return jsonify({"status": "error", "code": r.status_code})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
+
+@app.route('/update-waha-url', methods=['POST'])
+def update_waha_url():
+    """Update WAHA_API_URL dynamically from laptop/ngrok"""
+    global WAHA_API_URL
+    try:
+        data = request.get_json()
+        new_url = data.get("url")
+        if not new_url:
+            return jsonify({"status": "error", "message": "No URL provided"}), 400
+        WAHA_API_URL = new_url.rstrip("/")
+        print(f"🔄 WAHA URL updated: {WAHA_API_URL}")
+        return jsonify({"status": "success", "new_url": WAHA_API_URL})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ---------------- Main ---------------- #
 
 if __name__ == '__main__':
     print("🚀 Starting FastDeals Bot...")
