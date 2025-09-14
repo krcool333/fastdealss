@@ -1,103 +1,157 @@
-import os, asyncio, re, aiohttp, time, threading, requests, urllib.parse, json
+# Full ready-to-paste app.py
+# FastDeals Bot - Text-first, 1-hour dedupe, parallel image fetch workers
+import os
+import re
+import time
+import json
+import asyncio
+import aiohttp
+import threading
+import requests
+import urllib.parse
 from threading import Thread
 from flask import Flask, jsonify, request
 from telethon import TelegramClient, events
 from telethon.errors.common import TypeNotFoundError
 from dotenv import load_dotenv
 
-# Load environment variables
-dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
+# ---------------- Load env ---------------- #
+dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path=dotenv_path)
 
-API_ID = int(os.getenv('API_ID'))
-API_HASH = os.getenv('API_HASH')
-CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 AMAZON_TAG = "lootfastdeals-21"
 EARNKARO_ID = "4598441"
 DEPLOY_HOOK = os.getenv("RENDER_DEPLOY_HOOK")
 
-# Local WAHA API Configuration
-WAHA_API_URL = os.getenv('WAHA_API_URL')
-WAHA_API_KEY = os.getenv('WAHA_API_KEY')
-WHATSAPP_CHANNEL_ID = os.getenv('WHATSAPP_CHANNEL_ID')
+# WAHA (local) config
+WAHA_API_URL = os.getenv("WAHA_API_URL")    # e.g. https://xxxx.ngrok-free.app
+WAHA_API_KEY = os.getenv("WAHA_API_KEY")
+WHATSAPP_CHANNEL_ID = os.getenv("WHATSAPP_CHANNEL_ID")
 
+# Source channels to monitor
 SOURCE_IDS = [
     -1001315464303, -1001714047949, -1001707571730, -1001820593092,
     -1001448358487, -1001378801949, -1001387180060, -1001361058246,
     -1001561964907, -1002444882171, -1001505338947, -1001767957702,
-    -1001404064358, -1001772002285, -1001373588507 
+    -1001404064358, -1001772002285, -1001373588507
 ]
 
+# Common shortener patterns we expand
 SHORT_PATTERNS = [
-    r'(https?://fkrt\.cc/\S+)', r'(https?://myntr\.it/\S+)',
-    r'(https?://dl\.flipkart\.com/\S+)', r'(https?://ajio\.me/\S+)',
-    r'(https?://amzn\.to/\S+)', r'(https?://amzn\.in/\S+)',
-    r'(https?://bit\.ly/\S+)', r'(https?://tinyurl\.com/\S+)'
+    r"(https?://fkrt\.cc/\S+)", r"(https?://myntr\.it/\S+)",
+    r"(https?://dl\.flipkart\.com/\S+)", r"(https?://ajio\.me/\S+)",
+    r"(https?://amzn\.to/\S+)", r"(https?://amzn\.in/\S+)",
+    r"(https?://bit\.ly/\S+)", r"(https?://tinyurl\.com/\S+)"
 ]
 
-seen_urls = set()
-seen_products = {}   # Dedup store
+# ---------------- Runtime state ---------------- #
+seen_urls = set()        # for stats / tracking
+seen_products = {}       # canonical product -> last seen timestamp (seconds)
 last_msg_time = time.time()
 whatsapp_last_success = 0
-client = TelegramClient('session', API_ID, API_HASH)
+
+# Worker queue for image tasks
+IMAGE_TASK_QUEUE = None   # will be asyncio.Queue()
+WORKER_COUNT = 4          # concurrent image workers (change if needed)
+IMAGE_TASK_SEMAPHORE = None  # asyncio.Semaphore to limit concurrent HTTP fetches
+
+# Telethon client & Flask app
+client = TelegramClient("session", API_ID, API_HASH)
 app = Flask(__name__)
 
-# ---------------- Utils ---------------- #
+# ---------------- Helpers ---------------- #
 
 async def keep_waha_alive():
-    """Ping WAHA every 5 minutes, auto-retry if disconnected"""
+    """Ping WAHA every 5 minutes to detect availability (non-blocking)."""
     global WAHA_API_URL
     while True:
         await asyncio.sleep(300)
-        if not WAHA_API_URL: 
+        if not WAHA_API_URL:
             continue
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{WAHA_API_URL}/api/version",
-                                       headers={"X-Api-Key": WAHA_API_KEY},
-                                       timeout=10) as response:
-                    if response.status == 200:
-                        print("✅ WAHA alive")
-                    else:
-                        print(f"⚠️ WAHA ping failed {response.status}")
-        except Exception:
-            print("⚠️ WAHA not reachable, will retry...")
+                try:
+                    async with session.get(f"{WAHA_API_URL}/api/version",
+                                           headers={"X-Api-Key": WAHA_API_KEY},
+                                           timeout=10) as resp:
+                        if resp.status == 200:
+                            print("✅ WAHA keep-alive OK")
+                        else:
+                            print(f"⚠️ WAHA keep-alive {resp.status}")
+                except Exception:
+                    print("⚠️ WAHA not reachable (keep-alive); will retry")
+        except Exception as e:
+            print(f"❌ keep_waha_alive error: {e}")
 
 async def send_to_whatsapp(message):
-    """Send message to WhatsApp via WAHA (auto-retry safe)"""
-    global whatsapp_last_success, WAHA_API_URL
+    """Send text to WhatsApp via Local WAHA (retry-safe)."""
+    global WAHA_API_URL, WAHA_API_KEY, WHATSAPP_CHANNEL_ID, whatsapp_last_success
     if not WAHA_API_URL or not WAHA_API_KEY or not WHATSAPP_CHANNEL_ID:
+        # don't spam logs
         return False
     try:
         url = f"{WAHA_API_URL}/api/sendText"
         headers = {"X-Api-Key": WAHA_API_KEY, "Content-Type": "application/json"}
         payload = {"chatId": WHATSAPP_CHANNEL_ID, "text": message, "session": "default"}
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=15) as r:
+            async with session.post(url, json=payload, headers=headers, timeout=12) as r:
                 if r.status == 200:
-                    print("✅ Forwarded to WhatsApp")
                     whatsapp_last_success = time.time()
+                    print("✅ WhatsApp (text) sent")
                     return True
                 else:
-                    print(f"⚠️ WAHA API Error {r.status}")
+                    print(f"⚠️ WAHA API Error (text) {r.status}")
                     return False
     except Exception:
-        print("⚠️ WAHA unreachable, skipping WhatsApp")
+        print("⚠️ WAHA unreachable (text); will retry later")
+        return False
+
+async def send_to_whatsapp_with_image(caption, image_url):
+    """Send image+caption to WAHA via sendFile (best-effort)."""
+    global WAHA_API_URL, WAHA_API_KEY, WHATSAPP_CHANNEL_ID, whatsapp_last_success
+    if not WAHA_API_URL or not WAHA_API_KEY or not WHATSAPP_CHANNEL_ID:
+        return False
+    try:
+        url = f"{WAHA_API_URL}/api/sendFile"
+        headers = {"X-Api-Key": WAHA_API_KEY, "Content-Type": "application/json"}
+        payload = {
+            "chatId": WHATSAPP_CHANNEL_ID,
+            "session": "default",
+            "fileUrl": image_url,
+            "caption": caption
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=20) as r:
+                if r.status == 200:
+                    whatsapp_last_success = time.time()
+                    print("✅ WhatsApp (image) sent")
+                    return True
+                else:
+                    print(f"⚠️ WAHA API Error (image) {r.status}")
+                    return False
+    except Exception:
+        print("⚠️ WAHA unreachable (image); will retry later")
         return False
 
 async def expand_all(text):
+    """Expand common shortlinks quickly using HEAD (follow redirects)."""
     urls = sum((re.findall(p, text) for p in SHORT_PATTERNS), [])
-    if not urls: return text
+    if not urls:
+        return text
     async with aiohttp.ClientSession() as s:
         for u in urls:
             try:
                 async with s.head(u, allow_redirects=True, timeout=5) as r:
                     text = text.replace(u, str(r.url))
-            except:
+            except Exception:
                 pass
     return text
 
 def convert_amazon(text):
+    """Convert amazon links to canonical amazon.in dp links with affiliate tag."""
     pats = [
         r'(https?://(?:www\.)?amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))',
         r'(https?://(?:www\.)?amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))(?:\?|&amp;)tag=[^&amp;\s]*'
@@ -107,6 +161,7 @@ def convert_amazon(text):
     return text
 
 def convert_earnkaro(text):
+    """Wrap supported store links in EarnKaro affiliate links."""
     parts = [
         r'(https?://(?:www\.)?flipkart\.com/\S+)',
         r'(https?://(?:dl\.)?flipkart\.com/\S+)',
@@ -119,20 +174,23 @@ def convert_earnkaro(text):
     return text
 
 async def shorten_earnkaro(text):
+    """Shorten earnkaro wrapper links using tinyurl (best-effort)."""
     urls = re.findall(r'https?://earnkaro\.com/store\?id=\d+&amp;url=\S+', text)
-    if not urls: return text
+    if not urls:
+        return text
     async with aiohttp.ClientSession() as s:
         for u in urls:
             try:
                 api = f"http://tinyurl.com/api-create.php?url={u}"
-                async with s.get(api, timeout=5) as r:
+                async with s.get(api, timeout=6) as r:
                     short = await r.text()
                     text = text.replace(u, short)
-            except:
+            except Exception:
                 pass
     return text
 
 async def process(text):
+    """Expand, convert affiliate links and shorten where applicable."""
     t = await expand_all(text)
     t = convert_amazon(t)
     t = convert_earnkaro(t)
@@ -140,107 +198,259 @@ async def process(text):
     return t
 
 def canonicalize(url):
+    """Return canonical id string for known product URLs for dedupe."""
     m = re.search(r'amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10})', url, flags=re.I)
-    if m: return f"amazon:{m.group(1)}"
+    if m:
+        return f"amazon:{m.group(1)}"
     for dom in ["flipkart.com", "myntra.com", "ajio.com"]:
         if dom in url:
             return dom + ":" + url.split("?")[0].rstrip("/")
     return None
 
-def truncate_message(msg):
-    if len(msg) <= 700: return msg
-    urls = re.findall(r'https?://\S+', msg)
+def truncate_message(msg, max_len=700, preview_len=500):
+    """Shorten messages longer than max_len and append a 'More' link if any present."""
+    if len(msg) <= max_len:
+        return msg
+    urls = re.findall(r"https?://\S+", msg)
     more_link = urls[0] if urls else ""
-    return msg[:500] + "...\n👉 More: " + more_link
+    return msg[:preview_len] + "...\n👉 More: " + more_link
 
-# ---------------- Bot ---------------- #
+# ---------------- Image fetching ---------------- #
+
+async def fetch_image_from_url(product_url):
+    """
+    Attempt to fetch a main product image URL from the product page.
+    Strategy:
+      - GET the product URL (simple HTTP GET)
+      - look for meta property="og:image" or meta name="og:image"
+      - fallback: JSON-LD image property
+    Returns the image URL (string) or None on failure.
+    """
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; FastDealsBot/1.0)"}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(product_url, timeout=10) as resp:
+                if resp.status != 200:
+                    return None
+                html = await resp.text()
+                # common og:image
+                m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, flags=re.I)
+                if m:
+                    img = m.group(1)
+                    if img.startswith("//"):
+                        img = "https:" + img
+                    return img
+                # meta name pattern
+                m = re.search(r'<meta[^>]+name=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, flags=re.I)
+                if m:
+                    img = m.group(1)
+                    if img.startswith("//"):
+                        img = "https:" + img
+                    return img
+                # JSON-LD: look for "image"
+                m = re.search(r'"image"\s*:\s*"(https?://[^"]+)"', html)
+                if m:
+                    img = m.group(1)
+                    if img.startswith("//"):
+                        img = "https:" + img
+                    return img
+    except Exception as ex:
+        # keep logs concise
+        print(f"⚠️ fetch_image failed: {ex}")
+    return None
+
+# ---------------- Image worker logic ---------------- #
+
+async def image_worker(name):
+    """Background worker: takes tasks from IMAGE_TASK_QUEUE and tries to fetch & send images."""
+    global IMAGE_TASK_QUEUE, IMAGE_TASK_SEMAPHORE
+    print(f"🔧 Image worker {name} started")
+    while True:
+        task = await IMAGE_TASK_QUEUE.get()
+        try:
+            product_urls = task.get("urls", [])
+            caption = task.get("caption", "")
+            # try each url until image found
+            found_img = None
+            for u in product_urls:
+                # first resolve redirects fast using HEAD under semaphore
+                async with IMAGE_TASK_SEMAPHORE:
+                    final = u
+                    try:
+                        async with aiohttp.ClientSession() as session:
+                            async with session.head(u, allow_redirects=True, timeout=6) as r:
+                                final = str(r.url)
+                    except Exception:
+                        final = u
+                # attempt to fetch image (GET)
+                async with IMAGE_TASK_SEMAPHORE:
+                    img = await fetch_image_from_url(final)
+                if img:
+                    found_img = img
+                    break
+            # If image found, send to Telegram and WAHA (best-effort)
+            if found_img:
+                try:
+                    # send photo to Telegram as separate message
+                    await client.send_file(CHANNEL_ID, found_img, caption=caption)
+                    print(f"✅ Image posted to Telegram by worker {name}")
+                except Exception as ex:
+                    print(f"⚠️ Worker {name} failed to post image to Telegram: {ex}")
+                # send to WAHA too (best-effort)
+                if WHATSAPP_CHANNEL_ID:
+                    try:
+                        await send_to_whatsapp_with_image(caption, found_img)
+                    except Exception:
+                        pass
+            else:
+                # nothing found; log short line
+                print(f"⚠️ Worker {name}: no image found for task")
+        except Exception as e:
+            print(f"⚠️ Worker {name} exception: {e}")
+        finally:
+            IMAGE_TASK_QUEUE.task_done()
+
+# ---------------- Bot main ---------------- #
 
 async def bot_main():
+    global IMAGE_TASK_QUEUE, IMAGE_TASK_SEMAPHORE
+    # init queue + semaphore
+    IMAGE_TASK_QUEUE = asyncio.Queue()
+    IMAGE_TASK_SEMAPHORE = asyncio.Semaphore(5)  # throttles simultaneous fetches
+
+    # start worker tasks
+    for i in range(WORKER_COUNT):
+        asyncio.create_task(image_worker(f"W{i+1}"))
+
     await client.start()
     sources = []
     for i in SOURCE_IDS:
         try:
             e = await client.get_entity(i)
             sources.append(e.id)
-            print(f"✅ Connected: {e.title}")
+            print(f"✅ Connected to source: {e.title}")
         except Exception as ex:
-            print(f"❌ Source {i} failed: {ex}")
-    print(f"🚀 Monitoring {len(sources)} sources")
+            print(f"❌ Failed to connect source {i}: {ex}")
+
+    print(f"🚀 Monitoring {len(sources)} Telegram sources")
+    print(f"🔗 Forwarding to Telegram channel {CHANNEL_ID}")
+    if WHATSAPP_CHANNEL_ID:
+        print(f"🔗 Also forwarding to WhatsApp channel {WHATSAPP_CHANNEL_ID}")
 
     @client.on(events.NewMessage(chats=sources))
     async def handler(e):
-        global last_msg_time, seen_products
-        if e.message.media: return
-        txt = e.message.message or e.message.text or ""
-        if not txt: return
+        """Main quick handler: do light processing and send text immediately, enqueue image work."""
+        global seen_urls, seen_products, last_msg_time
 
-        expanded = await expand_all(txt)
-        urls = re.findall(r'https?://\S+', expanded)
+        # ignore media messages for now (can extend later)
+        if e.message.media:
+            return
+
+        raw_txt = e.message.message or e.message.text or ""
+        if not raw_txt:
+            return
+
+        # quick expand and processing (non-blocking)
+        processed_text = await process(raw_txt)
+        expanded_for_urls = await expand_all(raw_txt)
+        urls = re.findall(r"https?://\S+", expanded_for_urls)
+
+        # dedupe canonical products with 1-hour window (3600s)
         now = time.time()
-
         new_canon = []
-        async with aiohttp.ClientSession() as s:
-            for u in urls:
-                try:
-                    async with s.head(u, allow_redirects=True, timeout=5) as r:
-                        final = str(r.url)
-                except:
-                    final = u
-                c = canonicalize(final)
-                if not c: continue
-                if c not in seen_products or now - seen_products[c] > 18000:
-                    new_canon.append(c)
-        if not new_canon: return
-        for c in new_canon: seen_products[c] = now
+        for u in urls:
+            final_url = u
+            # try quick head to resolve redirect (non-blocking)
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.head(u, allow_redirects=True, timeout=4) as r:
+                        final_url = str(r.url)
+            except Exception:
+                final_url = u
+            c = canonicalize(final_url)
+            if not c:
+                continue
+            last_seen = seen_products.get(c)
+            if not last_seen or (now - last_seen) > 3600:  # 1 hour window
+                new_canon.append(c)
 
-        out = await process(txt)
+        if not new_canon:
+            # short log: skipped duplicate
+            print("⚠️ Skipped: duplicate product(s) within 1-hour window")
+            return
+
+        # mark newly accepted products
+        for c in new_canon:
+            seen_products[c] = now
+
+        # mark urls to seen_urls for stats
+        for u in urls:
+            seen_urls.add(u)
+
+        # prepare header and truncated message
         hdr = ""
         if any(c.startswith("amazon:") for c in new_canon): hdr = "📦 Amazon Deal:\n"
-        elif any(c.startswith("flipkart") for c in new_canon): hdr = "🛒 Flipkart Deal:\n"
-        elif any(c.startswith("myntra") for c in new_canon): hdr = "👗 Myntra Deal:\n"
-        elif any(c.startswith("ajio") for c in new_canon): hdr = "👟 Ajio Deal:\n"
-        msg = truncate_message(hdr + out)
+        elif any(c.startswith("flipkart.com:") for c in new_canon): hdr = "🛒 Flipkart Deal:\n"
+        elif any(c.startswith("myntra.com:") for c in new_canon): hdr = "👗 Myntra Deal:\n"
+        elif any(c.startswith("ajio.com:") for c in new_canon): hdr = "👟 Ajio Deal:\n"
 
+        msg = truncate_message(hdr + processed_text)
+
+        # 1) Send text immediately to Telegram (NO link preview to be fastest)
         try:
             await client.send_message(CHANNEL_ID, msg, link_preview=False)
-            print("✅ Forwarded to Telegram")
-            if WHATSAPP_CHANNEL_ID:
-                await send_to_whatsapp(msg)
+            print("✅ Sent text to Telegram (fast)")
         except Exception as ex:
-            print(f"❌ Send error: {ex}")
+            print(f"❌ Telegram send error: {ex}")
+
+        # 2) Send text immediately to WhatsApp (best-effort)
+        if WHATSAPP_CHANNEL_ID:
+            try:
+                await send_to_whatsapp(msg)
+            except Exception:
+                pass
+
+        # 3) Enqueue image fetching & posting (background worker will handle)
+        # Provide the list of URLs to try (original expanded urls)
+        if urls:
+            await IMAGE_TASK_QUEUE.put({"urls": urls, "caption": msg})
+
         last_msg_time = time.time()
 
     await client.run_until_disconnected()
 
-# ---------------- Maintenance ---------------- #
+# ---------------- Maintenance helpers ---------------- #
 
 def redeploy():
     hook = DEPLOY_HOOK
-    if hook:
-        try:
-            requests.post(hook, timeout=10)
-            print("✅ Auto redeploy triggered")
-            return True
-        except Exception as e:
-            print(f"❌ Redeploy failed: {e}")
-            return False
-    print("⚠️ Deploy hook not set!")
-    return False
+    if not hook:
+        print("⚠️ Deploy hook not set!")
+        return False
+    try:
+        requests.post(hook, timeout=10)
+        print("✅ Auto redeploy triggered")
+        return True
+    except Exception as e:
+        print(f"❌ Redeploy failed: {e}")
+        return False
 
 def keep_alive():
+    """HTTP ping to local app to reduce cold-starts on free providers."""
     while True:
         try:
             time.sleep(14 * 60)
             requests.get("http://127.0.0.1:10000/ping", timeout=5)
-        except:
+        except Exception:
             pass
 
 def monitor_health():
+    """Monitor last_msg_time and trigger redeploy if idle for too long."""
+    global last_msg_time
     while True:
         time.sleep(300)
         since = time.time() - last_msg_time
         if since > 1800:
-            print(f"⚠️ Idle {since//60} minutes, redeploying...")
+            print(f"⚠️ No messages for {int(since)//60} minutes — triggering redeploy")
             redeploy()
 
 def start_loop(loop):
@@ -251,16 +461,17 @@ def start_loop(loop):
             loop.run_until_complete(bot_main())
             break
         except TypeNotFoundError:
-            print("⚠️ Type not found, retrying...")
+            print("⚠️ TypeNotFoundError; retrying in 10s")
             time.sleep(10)
         except Exception as ex:
-            print(f"❌ Bot error: {ex}")
-            if attempt < 4: time.sleep(10)
+            print(f"❌ Bot start error: {ex}")
+            if attempt < 4:
+                time.sleep(10)
             break
 
-# ---------------- Flask ---------------- #
+# ---------------- Flask endpoints ---------------- #
 
-@app.route('/')
+@app.route("/")
 def home():
     return jsonify({
         "status": "running",
@@ -270,20 +481,22 @@ def home():
         "waha_url": WAHA_API_URL
     })
 
-@app.route('/ping')
-def ping(): return "pong"
+@app.route("/ping")
+def ping():
+    return "pong"
 
-@app.route('/health')
+@app.route("/health")
 def health():
     return jsonify({
         "time_since_last_message": int(time.time() - last_msg_time),
         "unique_links_processed": len(seen_urls),
         "whatsapp_configured": bool(WHATSAPP_CHANNEL_ID),
         "whatsapp_last_success": int(time.time() - whatsapp_last_success) if whatsapp_last_success else None,
-        "status": "healthy" if (time.time() - last_msg_time) < 3600 else "inactive"
+        "status": "healthy" if (time.time() - last_msg_time) < 3600 else "inactive",
+        "waha_type": "Local via ngrok"
     })
 
-@app.route('/stats')
+@app.route("/stats")
 def stats():
     return jsonify({
         "unique_links": len(seen_urls),
@@ -294,33 +507,33 @@ def stats():
         "waha_url": WAHA_API_URL
     })
 
-@app.route('/redeploy', methods=['POST'])
+@app.route("/redeploy", methods=["POST"])
 def redeploy_endpoint():
     ok = redeploy()
     return ("Redeploy triggered", 200) if ok else ("Redeploy failed", 500)
 
-@app.route('/test-whatsapp', methods=['POST'])
+@app.route("/test-whatsapp", methods=["POST"])
 def test_whatsapp():
+    """Send a test message to WAHA to verify connectivity"""
     if not WHATSAPP_CHANNEL_ID:
         return jsonify({"status": "error", "message": "WhatsApp not configured"})
     try:
-        test_msg = "🧪 Test message from FastDeals bot!"
+        test_msg = "🧪 Test message from FastDeals bot via Local WAHA!"
         r = requests.post(f"{WAHA_API_URL}/api/sendText",
                           headers={"X-Api-Key": WAHA_API_KEY, "Content-Type": "application/json"},
                           json={"chatId": WHATSAPP_CHANNEL_ID, "text": test_msg, "session": "default"},
                           timeout=10)
         if r.status_code == 200:
-            return jsonify({"status": "success"})
+            return jsonify({"status": "success", "message": "Test message sent to WhatsApp via Local WAHA"})
         else:
-            return jsonify({"status": "error", "message": f"Failed {r.text}"})
+            return jsonify({"status": "error", "message": f"Failed ({r.status_code})"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
 
-@app.route('/waha-health')
+@app.route("/waha-health")
 def waha_health():
     try:
-        r = requests.get(f"{WAHA_API_URL}/api/version",
-                         headers={"X-Api-Key": WAHA_API_KEY}, timeout=5)
+        r = requests.get(f"{WAHA_API_URL}/api/version", headers={"X-Api-Key": WAHA_API_KEY}, timeout=5)
         if r.status_code == 200:
             return jsonify({"status": "healthy", "waha": r.json()})
         else:
@@ -328,12 +541,17 @@ def waha_health():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
 
-@app.route('/update-waha-url', methods=['POST'])
+@app.route("/update-waha-url", methods=["POST"])
 def update_waha_url():
-    """Update WAHA_API_URL dynamically from laptop/ngrok"""
+    """
+    Update WAHA_API_URL dynamically (so your laptop/ngrok can push new ngrok URL).
+    Example usage on laptop after starting ngrok:
+      curl -X POST https://<render-app>/update-waha-url -H "Content-Type: application/json" \
+         -d '{"url":"https://abcd-1234.ngrok-free.app"}'
+    """
     global WAHA_API_URL
     try:
-        data = request.get_json()
+        data = request.get_json(force=True)
         new_url = data.get("url")
         if not new_url:
             return jsonify({"status": "error", "message": "No URL provided"}), 400
@@ -343,18 +561,22 @@ def update_waha_url():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# ---------------- Main ---------------- #
+# ---------------- Entrypoint ---------------- #
 
-if __name__ == '__main__':
-    print("🚀 Starting FastDeals Bot...")
+if __name__ == "__main__":
+    print("🚀 Starting FastDeals Bot (optimized)...")
     print(f"📱 Telegram Channel: {CHANNEL_ID}")
     print(f"💬 WhatsApp Channel: {WHATSAPP_CHANNEL_ID}")
     print(f"🔗 Local WAHA API: {WAHA_API_URL}")
+
     loop = asyncio.new_event_loop()
     Thread(target=start_loop, args=(loop,), daemon=True).start()
     Thread(target=keep_alive, daemon=True).start()
     Thread(target=monitor_health, daemon=True).start()
+
+    # Start WAHA keep-alive pinger if WAHA configured
     if WAHA_API_URL:
         Thread(target=lambda: asyncio.run(keep_waha_alive()), daemon=True).start()
+
     print("🌐 Starting web server on port 10000...")
-    app.run(host='0.0.0.0', port=10000, debug=False, use_reloader=False, threaded=True)
+    app.run(host="0.0.0.0", port=10000, debug=False, use_reloader=False, threaded=True)
