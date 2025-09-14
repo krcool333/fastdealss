@@ -1,11 +1,10 @@
 import os, asyncio, re, aiohttp, time, threading, requests
+import urllib.parse
 from threading import Thread
 from flask import Flask, jsonify, request
 from telethon import TelegramClient, events
 from telethon.errors.common import TypeNotFoundError
 from dotenv import load_dotenv
-from collections import defaultdict
-from datetime import datetime, timedelta
 
 # Load environment variables
 dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
@@ -19,9 +18,9 @@ EARNKARO_ID = "4598441"
 DEPLOY_HOOK = os.getenv("RENDER_DEPLOY_HOOK")
 
 # Local WAHA API Configuration (via ngrok)
-WAHA_API_URL = os.getenv('WAHA_API_URL')  # https://u455c56d48070.ngrok-free.app
-WAHA_API_KEY = os.getenv('WAHA_API_KEY')  # kr_cool_99987
-WHATSAPP_CHANNEL_ID = os.getenv('WHATSAPP_CHANNEL_ID')  # Your channel ID
+WAHA_API_URL = os.getenv('WAHA_API_URL')  # https://your-ngrok-url
+WAHA_API_KEY = os.getenv('WAHA_API_KEY')
+WHATSAPP_CHANNEL_ID = os.getenv('WHATSAPP_CHANNEL_ID')  # Your WhatsApp channel ID
 
 SOURCE_IDS = [
     -1001315464303, -1001714047949, -1001707571730, -1001820593092,
@@ -38,10 +37,9 @@ SHORT_PATTERNS = [
 ]
 
 seen_urls = set()
-seen_products = defaultdict(datetime)  # Track products and when they were last seen
+seen_products = {}   # Track product URLs (canonical) with timestamps for dedup
 last_msg_time = time.time()
 whatsapp_last_success = 0
-product_cooldown = timedelta(hours=4)  # Cooldown period for similar products
 client = TelegramClient('session', API_ID, API_HASH)
 app = Flask(__name__)
 
@@ -53,14 +51,14 @@ async def keep_waha_alive():
             if WAHA_API_URL:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(f"{WAHA_API_URL}/api/version", 
-                                         headers={"X-Api-Key": WAHA_API_KEY},
-                                         timeout=10) as response:
+                                           headers={"X-Api-Key": WAHA_API_KEY},
+                                           timeout=10) as response:
                         if response.status == 200:
                             print("✅ Local WAHA keep-alive ping successful")
                         else:
                             print(f"⚠️ Local WAHA keep-alive ping failed: {response.status}")
         except Exception as e:
-            print(f"❌ Local WAHA keep-alive error: {str(e)[:100]}...")  # Truncate long error messages
+            print(f"❌ Local WAHA keep-alive error: {e}")
 
 async def send_to_whatsapp(message):
     """Send message to WhatsApp Channel using local WAHA API"""
@@ -91,22 +89,12 @@ async def send_to_whatsapp(message):
                     return True
                 else:
                     print(f"❌ Local WAHA API Error: {response.status}")
-                    try:
-                        text = await response.text()
-                        # Truncate very long error messages to prevent log flooding
-                        if len(text) > 500:
-                            text = text[:500] + "..."
-                        print(f"Error details: {text}")
-                    except Exception as e:
-                        print(f"Could not read error response: {str(e)[:100]}...")
+                    text = await response.text()
+                    print(f"Error details: {text}")
                     return False
                         
     except Exception as e:
-        # Truncate long error messages to prevent log flooding
-        error_msg = str(e)
-        if len(error_msg) > 200:
-            error_msg = error_msg[:200] + "..."
-        print(f"❌ Local WAHA send error: {error_msg}")
+        print(f"❌ Local WAHA send error: {e}")
         return False
 
 async def expand_all(text):
@@ -167,42 +155,6 @@ async def process(text):
     t = await shorten_earnkaro(t)
     return t
 
-def extract_product_identifier(text):
-    """
-    Extract a unique identifier for a product to detect duplicates
-    based on product name and key features rather than just URLs
-    """
-    # Patterns to identify product names in messages
-    patterns = [
-        r'(?:Midea|Samsung|LG|Whirlpool|IFB)\s+\d+\s*Kg.*Washing\s*Machine',
-        r'Lifebuoy.*Body\s*Wash',
-        r'Dove.*Body\s*Wash',
-        r'Axe.*Body\s*Wash',
-        r'Levi.*s.*Clothing',
-        r'Spykar.*Clothing',
-        r'Oversized.*T.*Shirt',
-        r'Saree.*@',
-        # Add more patterns as needed for your products
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(0).lower().replace(" ", "")
-    
-    # Fallback: try to extract product name from percentage off and description
-    discount_match = re.search(r'\d+%\%?\s*Off?\s*[:-]?\s*(.*)', text, re.IGNORECASE)
-    if discount_match:
-        product_desc = discount_match.group(1)
-        # Clean up the product description
-        product_desc = re.sub(r'@\d+', '', product_desc)  # Remove prices
-        product_desc = re.sub(r'https?://\S+', '', product_desc)  # Remove URLs
-        product_desc = product_desc.strip().lower().replace(" ", "")
-        if len(product_desc) > 5:  # Ensure we have a meaningful identifier
-            return product_desc
-    
-    return None
-
 async def bot_main():
     await client.start()
     
@@ -223,50 +175,101 @@ async def bot_main():
     
     @client.on(events.NewMessage(chats=sources))
     async def handler(e):
-        global seen_urls, last_msg_time, seen_products
+        global seen_urls, last_msg_time
         
         if e.message.media: return
         
         txt = e.message.message or e.message.text or ""
         if not txt: return
         
-        # Extract product identifier to check for duplicates
-        product_id = extract_product_identifier(txt)
-        current_time = datetime.now()
+        # Deduplication based on final destination URLs (5-hour window)
+        expanded = await expand_all(txt)
+        urls_expanded = re.findall(r'https?://\S+', expanded)
+        current_time = time.time()
+        new_canonicals = []
+        async with aiohttp.ClientSession() as session:
+            for url in urls_expanded:
+                try:
+                    async with session.head(url, allow_redirects=True, timeout=5) as r:
+                        final_url = str(r.url)
+                except:
+                    continue
+                # Determine canonical product URL
+                m = re.search(r'amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10})', final_url, flags=re.I)
+                if m:
+                    asin = m.group(1)
+                    canonical = f"amazon.in/dp/{asin}"
+                elif "flipkart.com" in final_url:
+                    canonical = final_url.split('?')[0].rstrip('/')
+                elif "myntra.com" in final_url:
+                    canonical = final_url.split('?')[0].rstrip('/')
+                elif "ajio.com" in final_url:
+                    canonical = final_url.split('?')[0].rstrip('/')
+                else:
+                    continue
+                # Check if within 5-hour window
+                if canonical not in seen_products or current_time - seen_products.get(canonical, 0) > 18000:
+                    new_canonicals.append(canonical)
+        new_canonicals = list(set(new_canonicals))
+        if not new_canonicals:
+            return
+        for c in new_canonicals:
+            seen_products[c] = current_time
         
-        # Check if this is a duplicate product within cooldown period
-        if product_id and product_id in seen_products:
-            time_since_last_seen = current_time - seen_products[product_id]
-            if time_since_last_seen < product_cooldown:
-                print(f"⏩ Skipping duplicate product: {product_id}")
-                return
-        
+        # Process and forward the message
         out = await process(txt)
-        urls = re.findall(r'https?://\S+', out)
-        new = [u for u in urls if u not in seen_urls]
-        
-        if not new and product_id in seen_products:
-            # No new URLs but we've seen this product before
-            print(f"⏩ Skipping duplicate product (no new URLs): {product_id}")
+        urls_out = re.findall(r'https?://\S+', out)
+        new_out_urls = []
+        dup_out_urls = []
+        async with aiohttp.ClientSession() as session:
+            for out_url in urls_out:
+                canonical = None
+                if "amazon." in out_url:
+                    m = re.search(r'amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10})', out_url, flags=re.I)
+                    if m:
+                        asin = m.group(1)
+                        canonical = f"amazon.in/dp/{asin}"
+                elif any(x in out_url for x in ["tinyurl.com", "bit.ly", "amzn.to", "amzn.in"]):
+                    try:
+                        async with session.head(out_url, allow_redirects=True, timeout=5) as r:
+                            final_earn = str(r.url)
+                        parsed = urllib.parse.urlparse(final_earn)
+                        query = urllib.parse.parse_qs(parsed.query)
+                        orig_list = query.get('url') or []
+                        if orig_list:
+                            orig_url = orig_list[0]
+                            m2 = re.search(r'amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10})', orig_url, flags=re.I)
+                            if m2:
+                                asin = m2.group(1)
+                                canonical = f"amazon.in/dp/{asin}"
+                            elif "flipkart.com" in orig_url:
+                                canonical = orig_url.split('?')[0].rstrip('/')
+                            elif "myntra.com" in orig_url:
+                                canonical = orig_url.split('?')[0].rstrip('/')
+                            elif "ajio.com" in orig_url:
+                                canonical = orig_url.split('?')[0].rstrip('/')
+                    except:
+                        pass
+                if canonical is None or canonical in new_canonicals:
+                    new_out_urls.append(out_url)
+                else:
+                    dup_out_urls.append(out_url)
+        if not new_out_urls:
             return
+        # Update seen_urls for tracking
+        seen_urls.update(new_out_urls)
         
-        if not new and not product_id:
-            # No way to identify this product, skip it
-            print("⏩ Skipping message with no identifiable product or new URLs")
-            return
-        
-        seen_urls.update(new)
-        if product_id:
-            seen_products[product_id] = current_time
-        
+        # Header based on product domain
         hdr = ""
-        if any("flipkart.com" in u or "fkrt.cc" in u for u in new):
+        if any("flipkart.com" in c for c in new_canonicals):
             hdr = "🛒 Flipkart Deal:\n"
-        elif any("myntra.com" in u for u in new):
+        elif any("myntra.com" in c for c in new_canonicals):
             hdr = "👗 Myntra Deal:\n"
-        elif any("amazon.in" in u for u in new):
+        elif any("amazon.in" in c for c in new_canonicals):
             hdr = "📦 Amazon Deal:\n"
-        
+        # Remove duplicate URLs from message
+        for u in dup_out_urls:
+            out = out.replace(u, "")
         msg = hdr + out
         
         try:
@@ -391,9 +394,9 @@ def test_whatsapp():
         if response.status_code == 200:
             return jsonify({"status": "success", "message": "Test message sent to WhatsApp via Local WAHA"})
         else:
-            return jsonify({"status": "error", "message": f"Failed: {response.text[:100]}..."})
+            return jsonify({"status": "error", "message": f"Failed: {response.text}"})
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)[:100] + "..."})
+        return jsonify({"status": "error", "message": str(e)})
 
 @app.route('/waha-health')
 def waha_health():
@@ -407,7 +410,7 @@ def waha_health():
         else:
             return jsonify({"status": "error", "code": response.status_code})
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)[:100] + "..."})
+        return jsonify({"status": "error", "message": str(e)})
 
 if __name__ == '__main__':
     print("🚀 Starting FastDeals Bot with Local WAHA Integration...")
@@ -427,4 +430,4 @@ if __name__ == '__main__':
     
     # Start Flask web server
     print("🌐 Starting web server on port 10000...")
-    app.run(host='0.0.0.0', port=10000, debug=False, use_reloader=False, threaded=True)
+    app.run(host='0.0.0.0', port=10000, debug=False, use_reloader=False)
