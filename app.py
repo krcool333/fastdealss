@@ -41,6 +41,45 @@ whatsapp_last_success = 0
 client = TelegramClient('session', API_ID, API_HASH)
 app = Flask(__name__)
 
+# ===== DEDUPLICATION LOGIC =====
+recent_products = set()
+RECENT_PRODUCT_LIMIT = 1000
+
+def extract_product_key(text):
+    """Extract product key for deduplication"""
+    # Amazon: /dp/ASIN or /gp/product/ASIN
+    match = re.search(r'amazon\.(?:in|com)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10})', text, re.I)
+    if match:
+        return "AMZ-" + match.group(1)
+    
+    # Ajio: ajio.co/SHORTCODE
+    match = re.search(r'ajio\.(?:co|com)/(\w+)', text, re.I)
+    if match:
+        return "AJIO-" + match.group(1)
+    
+    # Flipkart: look for /p/itm..., fallback: flipkart domain + slug
+    match = re.search(r'flipkart\.com/.*?/p/itm([a-zA-Z0-9]+)', text, re.I)
+    if match:
+        return "FK-" + match.group(1)
+    
+    # Flipkart fallback - extract product slug
+    match = re.search(r'flipkart\.com/([^/?]+)', text, re.I)
+    if match:
+        return "FK-" + match.group(1)[:32]  # Limit length
+    
+    # Myntra: ...-productcode?
+    match = re.search(r'myntra\.com/.*?-([0-9]+)', text, re.I)
+    if match:
+        return "MYN-" + match.group(1)
+    
+    # Nykaa: nykaa.com/productcode
+    match = re.search(r'nykaa\.com/.*?/([a-zA-Z0-9-]+)', text, re.I)
+    if match:
+        return "NYK-" + match.group(1)[:32]
+    
+    return None
+
+# ===== ORIGINAL FUNCTIONS =====
 async def keep_waha_alive():
     """Keep local WAHA service alive by pinging it every 5 minutes"""
     while True:
@@ -88,7 +127,8 @@ async def send_to_whatsapp(message):
                 else:
                     print(f"❌ Local WAHA API Error: {response.status}")
                     text = await response.text()
-                    print(f"Error details: {text}")
+                    # Truncate long error details to reduce log spam
+                    print(f"Error details (truncated): {text[:120]}...")
                     return False
                         
     except Exception as e:
@@ -173,7 +213,7 @@ async def bot_main():
     
     @client.on(events.NewMessage(chats=sources))
     async def handler(e):
-        global seen_urls, last_msg_time
+        global seen_urls, last_msg_time, recent_products
         
         if e.message.media: return
         
@@ -181,6 +221,19 @@ async def bot_main():
         if not txt: return
         
         out = await process(txt)
+        
+        # ===== DEDUPLICATION CHECK =====
+        product_key = extract_product_key(out)
+        if product_key:
+            if product_key in recent_products:
+                print(f"🔁 Skipping duplicate product: {product_key}")
+                return
+            recent_products.add(product_key)
+            # Keep set size manageable
+            if len(recent_products) > RECENT_PRODUCT_LIMIT:
+                # Remove oldest entries (simple eviction)
+                recent_products = set(list(recent_products)[-RECENT_PRODUCT_LIMIT:])
+        
         urls = re.findall(r'https?://\S+', out)
         new = [u for u in urls if u not in seen_urls]
         
@@ -270,7 +323,8 @@ def home():
         "telegram_channel": str(CHANNEL_ID),
         "whatsapp_channel": WHATSAPP_CHANNEL_ID or "not configured",
         "waha_type": "Local via ngrok",
-        "waha_url": WAHA_API_URL
+        "waha_url": WAHA_API_URL,
+        "deduplication": f"Tracking {len(recent_products)} unique products"
     })
 
 @app.route('/ping')
@@ -282,6 +336,7 @@ def health():
     return jsonify({
         "time_since_last_message": int(time.time() - last_msg_time),
         "unique_links_processed": len(seen_urls),
+        "unique_products_tracked": len(recent_products),
         "whatsapp_configured": bool(WHATSAPP_CHANNEL_ID),
         "whatsapp_last_success": int(time.time() - whatsapp_last_success) if whatsapp_last_success else None,
         "status": "healthy" if (time.time() - last_msg_time) < 3600 else "inactive",
@@ -292,6 +347,7 @@ def health():
 def stats():
     return jsonify({
         "unique_links": len(seen_urls),
+        "unique_products": len(recent_products),
         "last_message_time": last_msg_time,
         "telegram_channel": CHANNEL_ID,
         "whatsapp_channel": WHATSAPP_CHANNEL_ID,
@@ -343,6 +399,7 @@ if __name__ == '__main__':
     print(f"📱 Telegram Channel: {CHANNEL_ID}")
     print(f"💬 WhatsApp Channel: {WHATSAPP_CHANNEL_ID}")
     print(f"🔗 Local WAHA API: {WAHA_API_URL}")
+    print("🔄 Product deduplication enabled")
     
     # Start all threads
     loop = asyncio.new_event_loop()
