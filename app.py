@@ -4,47 +4,47 @@ import time
 import random
 import asyncio
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, jsonify, request
 from telethon import TelegramClient, events
-from telethon.sessions import StringSession
 
 # ---------------- CONFIG ---------------- #
 API_ID = int(os.getenv("API_ID", ""))
 API_HASH = os.getenv("API_HASH", "")
-SESSION_STRING = os.getenv("SESSION_STRING", "")
+BOT_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 FORWARD_FROM = os.getenv("FORWARD_FROM", "").split(",")
-DEPLOY_HOOK = os.getenv("DEPLOY_HOOK", "")
+DEPLOY_HOOK = os.getenv("RENDER_DEPLOY_HOOK", "")
 WHATSAPP_CHANNEL_ID = os.getenv("WHATSAPP_CHANNEL_ID", "")
-WAHA_URL = os.getenv("WAHA_URL", "")
-AMAZON_TAG = "lootfastdeals-21"
+WAHA_URL = os.getenv("WAHA_API_URL", "")
+AMAZON_TAG = os.getenv("AFFILIATE_TAG", "lootfastdeals-21")
 
 # Dedup memory
 dedup_cache = {}
 DEDUP_WINDOW = 3600  # 1 hour
 
-# Rotating hashtags
+# Rotating hashtags pool
 HASHTAG_SETS = [
     "#LootDeals #Discount #OnlineShopping",
     "#Free #Offer #Sale",
+    "#TopDeals #BigSale #BestPrice",
+    "#PriceDrop #FlashSale #DealAlert",
 ]
 
 # Flask app
 app = Flask(__name__)
 
-# Telegram client with session string (no interactive prompt)
-client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+# Telegram bot client
+client = TelegramClient("bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
 # ---------------- HELPERS ---------------- #
 
 def normalize_url(url: str) -> str:
-    """Normalize product URLs and extract unique ID"""
+    """Normalize product URLs and extract unique ID for dedup"""
     if "amazon." in url:
         asin_match = re.search(r"/([A-Z0-9]{10})(?:[/?]|$)", url)
         if asin_match:
-            asin = asin_match.group(1)
-            return f"amazon:{asin}"
+            return f"amazon:{asin_match.group(1)}"
     if "flipkart." in url:
         pid_match = re.search(r"pid=([A-Z0-9]+)", url)
         if pid_match:
@@ -60,7 +60,7 @@ def normalize_url(url: str) -> str:
     return url
 
 def clean_url(url: str) -> str:
-    """Clean product URLs and force Amazon affiliate tag"""
+    """Clean product URLs and enforce Amazon affiliate tag"""
     if "amazon." in url:
         asin_match = re.search(r"/([A-Z0-9]{10})(?:[/?]|$)", url)
         if asin_match:
@@ -77,7 +77,7 @@ def choose_hashtags() -> str:
     return random.choice(HASHTAG_SETS)
 
 def is_duplicate(urls: list, text: str) -> bool:
-    """Check deduplication cache by URL IDs + text hash"""
+    """Check deduplication cache (URLs + text)"""
     now = time.time()
     text_hash = f"text:{hash(text)}"
 
@@ -213,7 +213,12 @@ def update_waha_url():
 
 def main():
     loop = asyncio.get_event_loop()
-    loop.create_task(client.start())
+
+    async def start_client():
+        await client.start()
+        print("✅ Telegram bot started")
+
+    loop.create_task(start_client())
     loop.create_task(client.run_until_disconnected())
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
 
