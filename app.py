@@ -1,4 +1,4 @@
-# FastDeals Bot - Optimized (No Duplicates, Amazon Tag Enforced, EarnKaro Optional)
+# FastDeals Bot - Optimized (No Duplicates, Amazon Tag Enforced, EarnKaro Optional, Labels + Hashtags)
 import os
 import re
 import time
@@ -199,7 +199,19 @@ async def bot_main():
         for u in urls:
             seen_urls.add(u)
 
-        msg = truncate_message(processed)
+        # ---------------- Label + Hashtags ---------------- #
+        label = ""
+        if any("amazon" in u for u in urls):
+            label = "🔥 Amazon Deal:\n"
+        elif any("flipkart" in u for u in urls):
+            label = "⚡ Flipkart Deal:\n"
+        elif any("myntra" in u for u in urls):
+            label = "✨ Myntra Deal:\n"
+        elif any("ajio" in u for u in urls):
+            label = "🛍️ Ajio Deal:\n"
+
+        msg = label + truncate_message(processed)
+        msg += "\n\n#LootDeals #Discount #OnlineShopping"
 
         try:
             await client.send_message(CHANNEL_ID, msg, link_preview=False)
