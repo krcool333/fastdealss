@@ -1,4 +1,4 @@
-# FastDeals Bot - Text-only, no duplicates, super fast
+# FastDeals Bot - Text-only, no duplicates, super fast (Amazon affiliate only)
 import os
 import re
 import time
@@ -18,7 +18,6 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 AMAZON_TAG = "lootfastdeals-21"
-EARNKARO_ID = "4598441"
 DEPLOY_HOOK = os.getenv("RENDER_DEPLOY_HOOK")
 
 WAHA_API_URL = os.getenv("WAHA_API_URL")
@@ -78,38 +77,9 @@ def convert_amazon(text):
         text = re.sub(p, lambda m: f"https://www.amazon.in/dp/{m.group(2)}/?tag={AMAZON_TAG}", text, flags=re.I)
     return text
 
-def convert_earnkaro(text):
-    pats = [
-        r'(https?://(?:www\.)?flipkart\.com/\S+)',
-        r'(https?://(?:dl\.)?flipkart\.com/\S+)',
-        r'(https?://(?:www\.)?myntra\.com/\S+)',
-        r'(https?://(?:www\.)?ajio\.com/\S+)',
-        r'(https?://(?:www\.)?nykaa\.com/\S+)'
-    ]
-    for p in pats:
-        text = re.sub(p, lambda m: f"https://earnkaro.com/store?id={EARNKARO_ID}&url={m.group(1)}", text, flags=re.I)
-    return text
-
-async def shorten_earnkaro(text):
-    urls = re.findall(r'https?://earnkaro\.com/store\?id=\d+&url=\S+', text)
-    if not urls:
-        return text
-    async with aiohttp.ClientSession() as s:
-        for u in urls:
-            try:
-                api = f"http://tinyurl.com/api-create.php?url={u}"
-                async with s.get(api, timeout=6) as r:
-                    short = await r.text()
-                    text = text.replace(u, short)
-            except Exception:
-                pass
-    return text
-
 async def process(text):
     t = await expand_all(text)
     t = convert_amazon(t)
-    t = convert_earnkaro(t)
-    t = await shorten_earnkaro(t)
     return t
 
 def canonicalize(url):
