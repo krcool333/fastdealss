@@ -7,11 +7,12 @@ import requests
 from datetime import datetime, timedelta
 from flask import Flask, jsonify, request
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 
 # ---------------- CONFIG ---------------- #
 API_ID = int(os.getenv("API_ID", ""))
 API_HASH = os.getenv("API_HASH", "")
-SESSION = os.getenv("SESSION", "anon")
+SESSION_STRING = os.getenv("SESSION_STRING", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 FORWARD_FROM = os.getenv("FORWARD_FROM", "").split(",")
 DEPLOY_HOOK = os.getenv("DEPLOY_HOOK", "")
@@ -19,7 +20,7 @@ WHATSAPP_CHANNEL_ID = os.getenv("WHATSAPP_CHANNEL_ID", "")
 WAHA_URL = os.getenv("WAHA_URL", "")
 AMAZON_TAG = "lootfastdeals-21"
 
-# Dedup memory (1 hour window)
+# Dedup memory
 dedup_cache = {}
 DEDUP_WINDOW = 3600  # 1 hour
 
@@ -32,8 +33,8 @@ HASHTAG_SETS = [
 # Flask app
 app = Flask(__name__)
 
-# Telegram client
-client = TelegramClient(SESSION, API_ID, API_HASH)
+# Telegram client with session string (no interactive prompt)
+client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 # ---------------- HELPERS ---------------- #
 
@@ -56,7 +57,7 @@ def normalize_url(url: str) -> str:
         ajio_match = re.search(r"/p/(\d+)", url)
         if ajio_match:
             return f"ajio:{ajio_match.group(1)}"
-    return url  # fallback
+    return url
 
 def clean_url(url: str) -> str:
     """Clean product URLs and force Amazon affiliate tag"""
@@ -65,12 +66,8 @@ def clean_url(url: str) -> str:
         if asin_match:
             asin = asin_match.group(1)
             return f"https://www.amazon.in/dp/{asin}?tag={AMAZON_TAG}"
-    if "flipkart." in url:
-        base = re.sub(r"\?.*", "", url)
-        return base
-    if "myntra." in url or "ajio." in url:
-        base = re.sub(r"\?.*", "", url)
-        return base
+    if "flipkart." in url or "myntra." in url or "ajio." in url:
+        return re.sub(r"\?.*", "", url)
     return url
 
 def truncate_message(msg: str, limit: int = 3500) -> str:
@@ -79,16 +76,26 @@ def truncate_message(msg: str, limit: int = 3500) -> str:
 def choose_hashtags() -> str:
     return random.choice(HASHTAG_SETS)
 
-def is_duplicate(urls: list) -> bool:
-    """Check deduplication cache"""
+def is_duplicate(urls: list, text: str) -> bool:
+    """Check deduplication cache by URL IDs + text hash"""
     now = time.time()
+    text_hash = f"text:{hash(text)}"
+
+    # check URLs
     for u in urls:
         key = normalize_url(u)
         if key in dedup_cache and now - dedup_cache[key] < DEDUP_WINDOW:
             return True
+
+    # check text
+    if text_hash in dedup_cache and now - dedup_cache[text_hash] < DEDUP_WINDOW:
+        return True
+
+    # store both
     for u in urls:
         key = normalize_url(u)
         dedup_cache[key] = now
+    dedup_cache[text_hash] = now
     return False
 
 def detect_platform(urls: list) -> str:
@@ -115,7 +122,7 @@ async def handler(event):
 
         urls = [clean_url(u) for u in urls]
 
-        if is_duplicate(urls):
+        if is_duplicate(urls, text):
             print("⏩ Skipped duplicate deal")
             return
 
