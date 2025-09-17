@@ -1,4 +1,4 @@
-# FastDeals Bot - Text-only, no duplicates, super fast (Amazon affiliate only)
+# FastDeals Bot - Optimized with Amazon tag enforcement + EarnKaro optional + Deduplication
 import os
 import re
 import time
@@ -24,7 +24,7 @@ WAHA_API_URL = os.getenv("WAHA_API_URL")
 WAHA_API_KEY = os.getenv("WAHA_API_KEY")
 WHATSAPP_CHANNEL_ID = os.getenv("WHATSAPP_CHANNEL_ID")
 
-# Dedup window (seconds)
+USE_EARNKARO = os.getenv("USE_EARNKARO", "false").lower() == "true"
 DEDUPE_SECONDS = int(os.getenv("DEDUPE_SECONDS", "3600"))  # default 1 hr
 MAX_MSG_LEN = int(os.getenv("MAX_MSG_LEN", "700"))
 PREVIEW_LEN = int(os.getenv("PREVIEW_LEN", "500"))
@@ -46,7 +46,7 @@ SHORT_PATTERNS = [
 
 # ---------------- Runtime state ---------------- #
 seen_urls = set()
-seen_products = {}  # product key -> last seen
+seen_products = {}
 last_msg_time = time.time()
 whatsapp_last_success = 0
 
@@ -69,17 +69,43 @@ async def expand_all(text):
     return text
 
 def convert_amazon(text):
-    pats = [
-        r'(https?://(?:www\.)?amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))',
-        r'(https?://(?:www\.)?amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))(?:\?|&amp;)tag=[^&amp;\s]*'
-    ]
-    for p in pats:
-        text = re.sub(p, lambda m: f"https://www.amazon.in/dp/{m.group(2)}/?tag={AMAZON_TAG}", text, flags=re.I)
+    """Force Amazon affiliate tag"""
+    pat = r'(https?://(?:www\.)?amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10}))'
+    def repl(m):
+        asin = m.group(2)
+        return f"https://www.amazon.in/dp/{asin}/?tag={AMAZON_TAG}"
+    text = re.sub(pat, repl, text, flags=re.I)
+    text = re.sub(r'([?&])tag=[^&\s]+', r'\1tag=' + AMAZON_TAG, text)
+    return text
+
+async def convert_earnkaro(text):
+    """Optional EarnKaro wrapping with fallback"""
+    if not USE_EARNKARO:
+        return text
+    urls = re.findall(r"(https?://\S+)", text)
+    for u in urls:
+        if any(x in u for x in ["flipkart", "myntra", "ajio"]):
+            try:
+                r = requests.post(
+                    "https://api.earnkaro.com/api/deeplink",
+                    json={"url": u},
+                    headers={"Content-Type": "application/json"},
+                    timeout=6
+                )
+                if r.status_code == 200:
+                    ek = r.json().get("data", {}).get("link")
+                    if ek:
+                        text = text.replace(u, ek)
+                        continue
+            except Exception as e:
+                print(f"⚠️ EarnKaro failed for {u}: {e}")
+                # fallback: leave original link
     return text
 
 async def process(text):
     t = await expand_all(text)
     t = convert_amazon(t)
+    t = await convert_earnkaro(t)
     return t
 
 def canonicalize(url):
