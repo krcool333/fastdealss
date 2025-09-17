@@ -1,9 +1,10 @@
-# FastDeals Bot - Optimized with Amazon tag enforcement + EarnKaro optional + Deduplication
+# FastDeals Bot - Optimized (No Duplicates, Amazon Tag Enforced, EarnKaro Optional)
 import os
 import re
 import time
 import requests
 import asyncio
+import hashlib
 from threading import Thread
 from flask import Flask, jsonify, request
 from telethon import TelegramClient, events
@@ -56,6 +57,7 @@ app = Flask(__name__)
 # ---------------- Helpers ---------------- #
 
 async def expand_all(text):
+    """Expand short URLs like fkrt.cc, amzn.to etc."""
     urls = sum((re.findall(p, text) for p in SHORT_PATTERNS), [])
     if not urls:
         return text
@@ -109,6 +111,7 @@ async def process(text):
     return t
 
 def canonicalize(url):
+    """Stable key for dedup (Amazon ASIN / Flipkart / Myntra / Ajio)"""
     m = re.search(r'amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10})', url, flags=re.I)
     if m:
         return f"amazon:{m.group(1)}"
@@ -116,6 +119,12 @@ def canonicalize(url):
         if dom in url:
             return dom + ":" + url.split("?")[0].rstrip("/")
     return None
+
+def hash_text(msg):
+    """Hash of deal text ignoring numbers/spaces for dedup"""
+    clean = re.sub(r"\s+", " ", msg.lower())
+    clean = re.sub(r"\d+", "", clean)
+    return hashlib.md5(clean.encode()).hexdigest()
 
 def truncate_message(msg):
     if len(msg) <= MAX_MSG_LEN:
@@ -165,21 +174,28 @@ async def bot_main():
         urls = re.findall(r"https?://\S+", processed)
 
         now = time.time()
-        new_canon = []
+        dedupe_keys = []
+
+        # Dedup by product URL
         for u in urls:
             c = canonicalize(u)
-            if not c:
-                continue
-            last_seen = seen_products.get(c)
-            if not last_seen or (now - last_seen) > DEDUPE_SECONDS:
-                new_canon.append(c)
+            if c:
+                last_seen = seen_products.get(c)
+                if not last_seen or (now - last_seen) > DEDUPE_SECONDS:
+                    dedupe_keys.append(c)
 
-        if not new_canon:
+        # Dedup by text hash
+        text_key = hash_text(processed)
+        last_seen = seen_products.get(text_key)
+        if not last_seen or (now - last_seen) > DEDUPE_SECONDS:
+            dedupe_keys.append(text_key)
+
+        if not dedupe_keys:
             print("⚠️ Duplicate skipped")
             return
 
-        for c in new_canon:
-            seen_products[c] = now
+        for k in dedupe_keys:
+            seen_products[k] = now
         for u in urls:
             seen_urls.add(u)
 
