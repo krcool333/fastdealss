@@ -118,20 +118,53 @@ async def process(text):
     t = await convert_earnkaro(t)
     return t
 
+def extract_product_name(text):
+    """Extract product name for better deduplication"""
+    # Look for product names after common patterns
+    patterns = [
+        r"(?:Samsung|iPhone|OnePlus|Realme|Xiaomi|Redmi|Poco|Motorola|Nokia|LG|Sony|HP|Dell|Lenovo|Asus|Acer|MSI|Canon|Nikon|Boat|JBL|Noise|Fire-Boltt|pTron|Mi)\s+[^@\n]+?(?=@|₹|http|$)",
+        r"[A-Z][a-z]+(?:\s+[A-Za-z0-9]+)+?(?:\s+\d+(?:cm|inch|mm|GB|TB|MB|MHz|GHz|W|mAh|Hz|" r"|MP|K|°|'|”))+(?=@|₹|http|$)",
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(0).strip()
+    
+    return None
+
 def canonicalize(url):
     """Stable key for dedup (Amazon ASIN / Flipkart / Myntra / Ajio)"""
     m = re.search(r'amazon\.(?:com|in)/(?:.*?/)?(?:dp|gp/product)/([A-Z0-9]{10})', url, flags=re.I)
     if m:
         return f"amazon:{m.group(1)}"
+    
     for dom in ["flipkart.com", "myntra.com", "ajio.com"]:
         if dom in url:
-            return dom + ":" + url.split("?")[0].rstrip("/")
+            # Extract product ID from Flipkart URLs
+            if "flipkart.com" in url:
+                pid_match = re.search(r'/p/([a-zA-Z0-9]+)', url)
+                if pid_match:
+                    return f"flipkart:{pid_match.group(1)}"
+            # For Myntra and Ajio, use the full path without parameters
+            path = url.split("?")[0].rstrip("/")
+            return dom + ":" + path.split("/")[-1] if "/" in path else path
+    
     return None
 
 def hash_text(msg):
     """Hash of deal text ignoring numbers/spaces for dedup"""
+    # Extract product name for better deduplication
+    product_name = extract_product_name(msg)
+    if product_name:
+        clean = re.sub(r"\s+", " ", product_name.lower())
+        clean = re.sub(r"[^\w\s]", "", clean)
+        return hashlib.md5(clean.encode()).hexdigest()
+    
+    # Fallback to original method
     clean = re.sub(r"\s+", " ", msg.lower())
     clean = re.sub(r"\d+", "", clean)
+    clean = re.sub(r"[^\w\s]", "", clean)
     return hashlib.md5(clean.encode()).hexdigest()
 
 def truncate_message(msg):
@@ -194,15 +227,19 @@ async def bot_main():
                 last_seen = seen_products.get(c)
                 if not last_seen or (now - last_seen) > DEDUPE_SECONDS:
                     dedupe_keys.append(c)
+                else:
+                    print(f"⚠️ Duplicate URL skipped: {c}")
 
-        # Dedup by text hash
+        # Dedup by text hash (improved)
         text_key = hash_text(processed)
         last_seen = seen_products.get(text_key)
         if not last_seen or (now - last_seen) > DEDUPE_SECONDS:
             dedupe_keys.append(text_key)
+        else:
+            print(f"⚠️ Duplicate text skipped: {text_key}")
 
         if not dedupe_keys:
-            print("⚠️ Duplicate skipped")
+            print("⚠️ Duplicate skipped (no new dedupe keys)")
             return
 
         for k in dedupe_keys:
@@ -212,13 +249,30 @@ async def bot_main():
 
         # ---------------- Label + Hashtags ---------------- #
         label = ""
-        if any("amazon" in u for u in urls):
+        expanded_urls = []
+        
+        # Expand short URLs to detect the actual domain
+        for url in urls:
+            if any(pattern in url for pattern in ["fkrt.cc", "myntr.it", "dl.flipkart.com", "amzn.to", "amzn.in", "bit.ly", "tinyurl.com"]):
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.head(url, allow_redirects=True, timeout=5) as response:
+                            expanded_urls.append(str(response.url))
+                except:
+                    expanded_urls.append(url)
+            else:
+                expanded_urls.append(url)
+        
+        # Check both original and expanded URLs for domain detection
+        all_urls = urls + expanded_urls
+        
+        if any("amazon" in u for u in all_urls):
             label = "🔥 Amazon Deal:\n"
-        elif any("flipkart" in u for u in urls):
+        elif any("flipkart" in u for u in all_urls):
             label = "⚡ Flipkart Deal:\n"
-        elif any("myntra" in u for u in urls):
+        elif any("myntra" in u for u in all_urls):
             label = "✨ Myntra Deal:\n"
-        elif any("ajio" in u for u in urls):
+        elif any("ajio" in u for u in all_urls):
             label = "🛍️ Ajio Deal:\n"
 
         msg = label + truncate_message(processed)
