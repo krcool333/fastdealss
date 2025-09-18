@@ -326,7 +326,7 @@ async def bot_main():
             label = "🛍️ Ajio Deal:\n"
         else:
             # Default label for other deals
-            label = "🎯 Hot Deal:\n"
+            label = "🎯 Fast Deal:\n"
 
         msg = label + truncate_message(processed)
         msg += f"\n\n{choose_hashtags()}"
