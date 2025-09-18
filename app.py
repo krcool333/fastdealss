@@ -43,7 +43,15 @@ SHORT_PATTERNS = [
     r"(https?://fkrt\.cc/\S+)", r"(https?://myntr\.it/\S+)",
     r"(https?://dl\.flipkart\.com/\S+)", r"(https?://ajio\.me/\S+)",
     r"(https?://amzn\.to/\S+)", r"(https?://amzn\.in/\S+)",
-    r"(https?://bit\.ly/\S+)", r"(https?://tinyurl\.com/\S+)"
+    r"(https?://bit\.ly/\S+)", r"(https?://tinyurl\.com/\S+)",
+    r"(https?://fktt\.co/\S+)", r"(https?://bitly\.cx/\S+)",  # Added problematic domains
+    r"(https?://fkt\.co/\S+)"
+]
+
+# Domains to avoid for WhatsApp (problematic/shorteners)
+WHATSAPP_BLACKLIST = [
+    "bitly.cx", "bit.ly", "tinyurl.com"
+    
 ]
 
 # ---------------- Runtime state ---------------- #
@@ -74,9 +82,11 @@ async def expand_all(text):
         for u in urls:
             try:
                 async with s.head(u, allow_redirects=True, timeout=5) as r:
-                    text = text.replace(u, str(r.url))
-            except Exception:
-                pass
+                    expanded_url = str(r.url)
+                    text = text.replace(u, expanded_url)
+                    print(f"🔗 Expanded {u} → {expanded_url}")
+            except Exception as e:
+                print(f"⚠️ Expansion failed for {u}: {e}")
     return text
 
 def convert_amazon(text):
@@ -120,16 +130,24 @@ async def process(text):
 
 def extract_product_name(text):
     """Extract product name for better deduplication"""
+    # Remove URLs first to avoid interference
+    text_no_urls = re.sub(r'https?://\S+', '', text)
+    
     # Look for product names after common patterns
     patterns = [
-        r"(?:Samsung|iPhone|OnePlus|Realme|Xiaomi|Redmi|Poco|Motorola|Nokia|LG|Sony|HP|Dell|Lenovo|Asus|Acer|MSI|Canon|Nikon|Boat|JBL|Noise|Fire-Boltt|pTron|Mi)\s+[^@\n]+?(?=@|₹|http|$)",
+        r"(?:Samsung|iPhone|OnePlus|Realme|Xiaomi|Redmi|Poco|Motorola|Nokia|LG|Sony|HP|Dell|Lenovo|Asus|Acer|MSI|Canon|Nikon|Boat|JBL|Noise|Fire-Boltt|pTron|Mi|Pepe\s+Jeans|Lee\s+Cooper)\s+[^@\n]+?(?=@|₹|http|$)",
         r"[A-Z][a-z]+(?:\s+[A-Za-z0-9]+)+?(?:\s+\d+(?:cm|inch|mm|GB|TB|MB|MHz|GHz|W|mAh|Hz|" r"|MP|K|°|'|”))+(?=@|₹|http|$)",
+        r"Upto\s+\d+%+\s+Off\s+On\s+([^@\n]+?)(?=@|₹|http|$)",
+        r"Flat\s+\d+%+\s+Off\s+On\s+([^@\n]+?)(?=@|₹|http|$)",
     ]
     
     for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
+        match = re.search(pattern, text_no_urls, re.IGNORECASE)
         if match:
-            return match.group(0).strip()
+            product_name = match.group(0).strip()
+            # Clean up the product name
+            product_name = re.sub(r'^(Upto|Flat)\s+\d+%\s+Off\s+On\s+', '', product_name, flags=re.IGNORECASE)
+            return product_name
     
     return None
 
@@ -139,14 +157,19 @@ def canonicalize(url):
     if m:
         return f"amazon:{m.group(1)}"
     
-    for dom in ["flipkart.com", "myntra.com", "ajio.com"]:
+    # Handle Flipkart product IDs
+    if "flipkart.com" in url:
+        pid_match = re.search(r'/p/([a-zA-Z0-9]+)', url)
+        if pid_match:
+            return f"flipkart:{pid_match.group(1)}"
+        # Also check for other Flipkart patterns
+        item_match = re.search(r'/itm/([a-zA-Z0-9]+)', url)
+        if item_match:
+            return f"flipkart:{item_match.group(1)}"
+    
+    # For Myntra and Ajio, use the full path without parameters
+    for dom in ["myntra.com", "ajio.com"]:
         if dom in url:
-            # Extract product ID from Flipkart URLs
-            if "flipkart.com" in url:
-                pid_match = re.search(r'/p/([a-zA-Z0-9]+)', url)
-                if pid_match:
-                    return f"flipkart:{pid_match.group(1)}"
-            # For Myntra and Ajio, use the full path without parameters
             path = url.split("?")[0].rstrip("/")
             return dom + ":" + path.split("/")[-1] if "/" in path else path
     
@@ -159,13 +182,20 @@ def hash_text(msg):
     if product_name:
         clean = re.sub(r"\s+", " ", product_name.lower())
         clean = re.sub(r"[^\w\s]", "", clean)
+        print(f"🔑 Product name hash: {product_name} → {hashlib.md5(clean.encode()).hexdigest()}")
         return hashlib.md5(clean.encode()).hexdigest()
     
-    # Fallback to original method
+    # Fallback to original method - but improved
     clean = re.sub(r"\s+", " ", msg.lower())
-    clean = re.sub(r"\d+", "", clean)
-    clean = re.sub(r"[^\w\s]", "", clean)
-    return hashlib.md5(clean.encode()).hexdigest()
+    # Remove URLs for better deduplication
+    clean = re.sub(r'https?://\S+', '', clean)
+    # Remove prices and percentages
+    clean = re.sub(r'₹\s*\d+', '', clean)
+    clean = re.sub(r'\d+%', '', clean)
+    clean = re.sub(r'[^\w\s]', '', clean)
+    result = hashlib.md5(clean.encode()).hexdigest()
+    print(f"🔑 Fallback hash: {clean} → {result}")
+    return result
 
 def truncate_message(msg):
     if len(msg) <= MAX_MSG_LEN:
@@ -177,10 +207,23 @@ def truncate_message(msg):
 def choose_hashtags():
     return random.choice(HASHTAG_SETS)
 
+def is_whatsapp_safe(url):
+    """Check if URL is safe for WhatsApp (not blacklisted)"""
+    return not any(blacklisted in url for blacklisted in WHATSAPP_BLACKLIST)
+
 async def send_to_whatsapp(message):
     global WAHA_API_URL, WAHA_API_KEY, WHATSAPP_CHANNEL_ID, whatsapp_last_success
     if not WAHA_API_URL or not WAHA_API_KEY or not WHATSAPP_CHANNEL_ID:
         return
+    
+    # Check if message contains unsafe URLs for WhatsApp
+    urls = re.findall(r"https?://\S+", message)
+    unsafe_urls = [url for url in urls if not is_whatsapp_safe(url)]
+    
+    if unsafe_urls:
+        print(f"⚠️ Skipping WhatsApp - unsafe URLs: {unsafe_urls}")
+        return
+    
     try:
         url = f"{WAHA_API_URL}/api/sendText"
         headers = {"X-Api-Key": WAHA_API_KEY, "Content-Type": "application/json"}
@@ -190,8 +233,8 @@ async def send_to_whatsapp(message):
                 if r.status == 200:
                     whatsapp_last_success = time.time()
                     print("✅ WhatsApp sent")
-    except Exception:
-        print("⚠️ WAHA unreachable")
+    except Exception as e:
+        print(f"⚠️ WAHA unreachable: {e}")
 
 # ---------------- Bot main ---------------- #
 
@@ -214,6 +257,8 @@ async def bot_main():
         if not raw_txt:
             return
 
+        print(f"📨 Raw message: {raw_txt[:100]}...")
+        
         processed = await process(raw_txt)
         urls = re.findall(r"https?://\S+", processed)
 
@@ -227,16 +272,18 @@ async def bot_main():
                 last_seen = seen_products.get(c)
                 if not last_seen or (now - last_seen) > DEDUPE_SECONDS:
                     dedupe_keys.append(c)
+                    print(f"🔗 URL dedupe key: {c}")
                 else:
-                    print(f"⚠️ Duplicate URL skipped: {c}")
+                    print(f"⚠️ Duplicate URL skipped: {c} (seen {int(now - last_seen)}s ago)")
 
         # Dedup by text hash (improved)
         text_key = hash_text(processed)
         last_seen = seen_products.get(text_key)
         if not last_seen or (now - last_seen) > DEDUPE_SECONDS:
             dedupe_keys.append(text_key)
+            print(f"📝 Text dedupe key: {text_key}")
         else:
-            print(f"⚠️ Duplicate text skipped: {text_key}")
+            print(f"⚠️ Duplicate text skipped: {text_key} (seen {int(now - last_seen)}s ago)")
 
         if not dedupe_keys:
             print("⚠️ Duplicate skipped (no new dedupe keys)")
@@ -253,12 +300,15 @@ async def bot_main():
         
         # Expand short URLs to detect the actual domain
         for url in urls:
-            if any(pattern in url for pattern in ["fkrt.cc", "myntr.it", "dl.flipkart.com", "amzn.to", "amzn.in", "bit.ly", "tinyurl.com"]):
+            if any(pattern in url for pattern in ["fkrt.cc", "myntr.it", "dl.flipkart.com", "amzn.to", "amzn.in", "bit.ly", "tinyurl.com", "fktt.co", "fkt.co", "bitly.cx"]):
                 try:
                     async with aiohttp.ClientSession() as session:
                         async with session.head(url, allow_redirects=True, timeout=5) as response:
-                            expanded_urls.append(str(response.url))
-                except:
+                            expanded_url = str(response.url)
+                            expanded_urls.append(expanded_url)
+                            print(f"🔍 Expanded {url} → {expanded_url}")
+                except Exception as e:
+                    print(f"⚠️ Expansion failed for {url}: {e}")
                     expanded_urls.append(url)
             else:
                 expanded_urls.append(url)
@@ -274,6 +324,9 @@ async def bot_main():
             label = "✨ Myntra Deal:\n"
         elif any("ajio" in u for u in all_urls):
             label = "🛍️ Ajio Deal:\n"
+        else:
+            # Default label for other deals
+            label = "🎯 Hot Deal:\n"
 
         msg = label + truncate_message(processed)
         msg += f"\n\n{choose_hashtags()}"
@@ -287,10 +340,11 @@ async def bot_main():
         if WHATSAPP_CHANNEL_ID:
             try:
                 await send_to_whatsapp(msg)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"⚠️ WhatsApp error: {e}")
 
         last_msg_time = time.time()
+        print(f"✅ Processing complete at {time.strftime('%H:%M:%S')}")
 
     await client.run_until_disconnected()
 
