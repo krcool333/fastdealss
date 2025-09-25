@@ -457,6 +457,17 @@ def update_waha_url():
         print(f"🔄 WAHA URL updated: {WAHA_API_URL}")
         return jsonify({"status": "ok", "url": WAHA_API_URL})
     return jsonify({"error": "no url"}), 400
+# Add this right before the last section ---------------- Entrypoint ----------------
+
+@app.route("/debug-whatsapp", methods=["GET"])
+def debug_whatsapp():
+    """Debug WhatsApp channel info"""
+    return jsonify({
+        "current_channel_id": WHATSAPP_CHANNEL_ID,
+        "waha_url": WAHA_API_URL,
+        "api_key_set": bool(WAHA_API_KEY),
+        "whatsapp_channel_set": bool(WHATSAPP_CHANNEL_ID)
+    })
 
 # ---------------- Entrypoint ---------------- #
 
